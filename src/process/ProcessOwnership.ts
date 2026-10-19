@@ -1356,9 +1356,13 @@ const scanWithOwnershipEvidence = async (
   const retainedByPid = new Map(
     retained.map((candidate) => [candidate.pid, candidate]),
   );
-  const failures: ProcessOwnershipValidationFailure[] = [
-    ...baselineIdentityFailures,
-  ];
+  // The final native fact can settle an earlier baseline read failure. Use
+  // the same absence fact that retires the generation from the evidence owner;
+  // a missing process-table row or a still-unavailable identity cannot do so.
+  const failures: ProcessOwnershipValidationFailure[] =
+    baselineIdentityFailures.filter(
+      ({ pid }) => factsByPid.get(pid)?.state !== "absent",
+    );
   const unverified: OwnershipSweepUnverifiedProcess[] = [];
   const owned: ProcessTableEntry[] = [];
   const identities = new Map<number, string | null>();

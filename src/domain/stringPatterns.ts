@@ -18,3 +18,21 @@ export const PADDED_BASE64_PATTERN = new RegExp(
 export const CANONICAL_BASE64_PATTERN = new RegExp(
   `${PADDED_BASE64_PREFIX}(?!.*[^AQgw]==$)(?!.*[^AEIMQUYcgkosw048=]=$)(?:....)*$`,
 );
+
+const PADDED_BASE64_SCHEMA_CONSTRAINTS = [
+  { pattern: "^(?:....)*$" },
+  { pattern: String.raw`^[A-Za-z0-9+\x2f]*={0,2}$` },
+  { not: { pattern: String.raw`[^A-Za-z0-9+\x2f=]` } },
+] as const;
+const CANONICAL_BASE64_SCHEMA_CONSTRAINTS = [
+  ...PADDED_BASE64_SCHEMA_CONSTRAINTS,
+  { not: { pattern: "[^AQgw]==$|[^AEIMQUYcgkosw048=]=$" } },
+] as const;
+
+/** Equivalent portable schema clauses for these two stack-safe runtime grammars. */
+export const base64PatternSchemaConstraints = (pattern: string) =>
+  pattern === CANONICAL_BASE64_PATTERN.source
+    ? CANONICAL_BASE64_SCHEMA_CONSTRAINTS
+    : pattern === PADDED_BASE64_PATTERN.source
+      ? PADDED_BASE64_SCHEMA_CONSTRAINTS
+      : undefined;

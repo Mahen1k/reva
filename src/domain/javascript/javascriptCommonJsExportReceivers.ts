@@ -2,6 +2,7 @@ import * as t from "@babel/types";
 
 import {
   semanticStaticPropertyKey,
+  semanticFinalObjectProperty,
   semanticWriteTargets,
   unwrapJavaScriptExpression,
 } from "./javascriptAstValues.js";
@@ -12,6 +13,37 @@ import {
 import { isUnmodifiedGlobalReference } from "./javascriptSemanticAmbientWrites.js";
 import { traverseJavaScriptAstSteps } from "./javascriptSemanticTraversal.js";
 import { semanticPropertyPathKeyMatches } from "./javascriptSemanticPropertyPaths.js";
+import { createSemanticModuleInterop } from "./javascriptModuleInterop.js";
+
+const exportInvocations = new WeakMap<
+  JavaScriptSemanticAnalysisState,
+  ReturnType<typeof createSemanticModuleInterop>
+>();
+
+/** Share the intrinsic owner's positional and capture proofs across CJS consumers. */
+const commonJsExportInvocation = (
+  node: t.CallExpression,
+  state: JavaScriptSemanticAnalysisState,
+) => {
+  let interop = exportInvocations.get(state);
+  if (interop === undefined) {
+    interop = createSemanticModuleInterop(state);
+    for (const { node: write, path } of state.ambientWriteEffects)
+      if (write !== undefined && path[0] === "global")
+        interop.retainWrite(write, [
+          "intrinsic",
+          ...path
+            .slice(1)
+            .map((key) =>
+              typeof key === "string" || typeof key === "number"
+                ? String(key)
+                : null,
+            ),
+        ]);
+    exportInvocations.set(state, interop);
+  }
+  return interop.intrinsicInvocation(node);
+};
 
 export type CommonJsExportReceiverEffect =
   | "connected"
@@ -88,6 +120,73 @@ export const commonJsDefinedExport = (
     receiver,
     descriptor,
   };
+};
+
+/** Native Object.assign publishes source values only through a CJS receiver. */
+const commonJsAssignedExports = (
+  node: t.Node,
+  state: JavaScriptSemanticAnalysisState,
+):
+  | { readonly receiver: t.Node; readonly sources: readonly t.Node[] }
+  | undefined => {
+  if (!t.isCallExpression(node)) return undefined;
+  const invocation = commonJsExportInvocation(node, state);
+  if (
+    invocation?.kind !== "known" ||
+    invocation.path.length !== 3 ||
+    invocation.path[0] !== "intrinsic" ||
+    invocation.path[1] !== "Object" ||
+    invocation.path[2] !== "assign"
+  )
+    return undefined;
+  const [target, ...sources] = invocation.arguments ?? [];
+  if (!t.isExpression(target)) return undefined;
+  const receiver = unwrapJavaScriptExpression(target).node;
+  if (
+    !isUnshadowedGlobal(receiver, state, "exports") &&
+    !isCommonJsModuleExports(receiver, state)
+  )
+    return undefined;
+  return {
+    receiver,
+    sources: sources.flatMap((source) =>
+      t.isSpreadElement(source)
+        ? [source.argument]
+        : t.isExpression(source)
+          ? [source]
+          : [],
+    ),
+  };
+};
+
+/** Runtime values published by the CommonJS syntax owner, before receiver applicability. */
+export const commonJsRuntimeExportValues = (
+  node: t.Node,
+  state: JavaScriptSemanticAnalysisState,
+): readonly {
+  readonly exportedName: string;
+  readonly value: t.Node | null;
+}[] => {
+  if (t.isAssignmentExpression(node)) {
+    const exportedName = commonJsExportName(node.left, state);
+    return exportedName === undefined
+      ? []
+      : [{ exportedName, value: node.operator === "=" ? node.right : null }];
+  }
+  const assigned = commonJsAssignedExports(node, state);
+  if (assigned !== undefined)
+    return assigned.sources.map((value) => ({ exportedName: "*", value }));
+  const defined = commonJsDefinedExport(node, state);
+  if (defined === undefined) return [];
+  const descriptor = unwrapJavaScriptExpression(defined.descriptor).node;
+  return [
+    {
+      exportedName: defined.exportedName,
+      value: t.isObjectExpression(descriptor)
+        ? (semanticFinalObjectProperty(descriptor, "value") ?? null)
+        : null,
+    },
+  ];
 };
 
 type Identity = t.Node | null;
@@ -217,7 +316,9 @@ export function* indexCommonJsExportReceiversSteps(
               : publicIdentity,
         );
       }
-      const defined = commonJsDefinedExport(node, state);
+      const defined =
+        commonJsDefinedExport(node, state) ??
+        commonJsAssignedExports(node, state);
       if (defined !== undefined && t.isCallExpression(node))
         captures.set(
           node,

@@ -1,148 +1,146 @@
 import { expect, it, vi } from "vitest";
 
-const filesystem = vi.hoisted(() => ({
-  readFile: vi.fn(),
-}));
-
-vi.mock("node:fs/promises", async (importOriginal) => {
-  const original = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...original, readFile: filesystem.readFile };
-});
-
-import { createSystemProcessOwnershipHost } from "./ProcessOwnershipObservation.js";
-import type { ProcessTableEntry } from "./ProcessOwnership.js";
-
-const entry: ProcessTableEntry = {
-  pid: 42,
-  parentPid: 1,
-  processGroupId: 42,
-  state: "S",
-  command: "fixture",
-};
+import { observeLinuxProcessIdentity } from "./LinuxProcessIdentity.js";
 
 const filesystemError = (code: string): NodeJS.ErrnoException =>
   Object.assign(new Error(code), { code });
 
-it("reports absence only when /proc lookup and signal-zero both report ESRCH", async () => {
-  const host = createSystemProcessOwnershipHost("linux", {});
-  const signalProbe = vi.spyOn(process, "kill").mockImplementation(() => {
+const fixture = () => {
+  const readStat = vi.fn<(pid: number) => string>();
+  const probe = vi.fn<(pid: number) => boolean>();
+  return {
+    readStat,
+    probe,
+    observe: (signal?: AbortSignal) =>
+      observeLinuxProcessIdentity(42, { readStat, probe }, signal),
+  };
+};
+
+it("reports absence only when /proc lookup and signal-zero both report ESRCH", () => {
+  const host = fixture();
+  host.probe.mockImplementation(() => {
     throw filesystemError("ESRCH");
   });
-  try {
-    for (const code of ["ENOENT", "ESRCH"]) {
-      filesystem.readFile.mockRejectedValueOnce(filesystemError(code));
-      await expect(host.processIdentities?.([entry])).resolves.toEqual(
-        new Map([
-          [
-            42,
-            {
-              state: "absent",
-              reason: "not-found-in-caller-pid-namespace",
-            },
-          ],
-        ]),
-      );
-    }
-    expect(signalProbe).toHaveBeenCalledTimes(2);
-    expect(signalProbe).toHaveBeenNthCalledWith(1, 42, 0);
-  } finally {
-    signalProbe.mockRestore();
-  }
-});
-
-it("keeps hidden or permission-denied live PIDs unavailable", async () => {
-  const host = createSystemProcessOwnershipHost("linux", {});
-  const signalProbe = vi.spyOn(process, "kill");
-  try {
-    filesystem.readFile.mockRejectedValueOnce(filesystemError("ENOENT"));
-    signalProbe.mockReturnValueOnce(true);
-    await expect(host.processIdentities?.([entry])).resolves.toEqual(
-      new Map([
-        [
-          42,
-          {
-            state: "unavailable",
-            reason: "proc_stat_missing_but_process_signal_probe_succeeded",
-          },
-        ],
-      ]),
-    );
-
-    filesystem.readFile.mockRejectedValueOnce(filesystemError("ENOENT"));
-    signalProbe.mockImplementationOnce(() => {
-      throw filesystemError("EPERM");
+  for (const code of ["ENOENT", "ESRCH"]) {
+    host.readStat.mockImplementationOnce(() => {
+      throw filesystemError(code);
     });
-    const denied = await host.processIdentities?.([entry]);
-    const deniedIdentity = denied?.get(42);
-    expect(deniedIdentity).toMatchObject({ state: "unavailable" });
-    expect(
-      deniedIdentity?.state === "unavailable" ? deniedIdentity.reason : "",
-    ).toContain("EPERM");
-  } finally {
-    signalProbe.mockRestore();
+    expect(host.observe()).toEqual({
+      state: "absent",
+      reason: "not-found-in-caller-pid-namespace",
+    });
   }
+  expect(host.probe).toHaveBeenCalledTimes(2);
+  expect(host.probe).toHaveBeenNthCalledWith(1, 42);
 });
 
-it("keeps permission, parser, and unexpected failures unavailable", async () => {
-  const host = createSystemProcessOwnershipHost("linux", {});
-  const signalProbe = vi.spyOn(process, "kill");
-  try {
-    for (const code of ["EACCES", "EPERM", "EIO"]) {
-      filesystem.readFile.mockRejectedValueOnce(filesystemError(code));
-      const result = await host.processIdentities?.([entry]);
-      expect(result?.get(42)?.state).toBe("unavailable");
-    }
-
-    filesystem.readFile.mockResolvedValueOnce("42 (fixture) S malformed");
-    await expect(host.processIdentities?.([entry])).resolves.toEqual(
-      new Map([[42, { state: "unavailable", reason: "malformed_proc_stat" }]]),
-    );
-    expect(signalProbe).not.toHaveBeenCalled();
-  } finally {
-    signalProbe.mockRestore();
-  }
+it("keeps hidden or permission-denied live PIDs unavailable", () => {
+  const host = fixture();
+  host.readStat.mockImplementation(() => {
+    throw filesystemError("ENOENT");
+  });
+  host.probe.mockReturnValueOnce(true);
+  expect(host.observe()).toEqual({
+    state: "unavailable",
+    reason: "proc_stat_missing_but_process_signal_probe_succeeded",
+  });
+  host.probe.mockImplementationOnce(() => {
+    throw filesystemError("EPERM");
+  });
+  expect(host.observe()).toMatchObject({
+    state: "unavailable",
+    reason: expect.stringContaining("EPERM"),
+  });
+  host.probe.mockReturnValueOnce(false);
+  expect(host.observe()).toMatchObject({
+    state: "unavailable",
+    reason: "proc_stat_missing_and_process_signal_probe_returned_false",
+  });
 });
 
-it("rejects invalid PIDs before procfs lookup or signal probing", async () => {
-  const host = createSystemProcessOwnershipHost("linux", {});
-  const signalProbe = vi.spyOn(process, "kill");
-  filesystem.readFile.mockClear();
-  try {
-    await expect(
-      host.processIdentities?.([{ ...entry, pid: 0 }]),
-    ).resolves.toEqual(
-      new Map([[0, { state: "unavailable", reason: "invalid_process_id" }]]),
-    );
-    expect(filesystem.readFile).not.toHaveBeenCalled();
-    expect(signalProbe).not.toHaveBeenCalled();
-  } finally {
-    signalProbe.mockRestore();
+it("keeps permission, parser, and unexpected failures unavailable", () => {
+  const host = fixture();
+  for (const code of ["EACCES", "EPERM", "EIO"]) {
+    host.readStat.mockImplementationOnce(() => {
+      throw filesystemError(code);
+    });
+    expect(host.observe()).toMatchObject({ state: "unavailable" });
   }
+  host.readStat.mockReturnValueOnce("42 (fixture) S malformed");
+  expect(host.observe()).toEqual({
+    state: "unavailable",
+    reason: "malformed_proc_stat",
+  });
+  expect(host.probe).not.toHaveBeenCalled();
 });
 
-it("preserves cancellation before and after the signal-zero probe", async () => {
-  const host = createSystemProcessOwnershipHost("linux", {});
+it("rejects invalid PIDs before procfs lookup or signal probing", () => {
+  const host = fixture();
+  expect(observeLinuxProcessIdentity(0, host)).toEqual({
+    state: "unavailable",
+    reason: "invalid_process_id",
+  });
+  expect(host.readStat).not.toHaveBeenCalled();
+  expect(host.probe).not.toHaveBeenCalled();
+});
+
+it("preserves cancellation before and after the signal-zero probe", () => {
+  const host = fixture();
   const controller = new AbortController();
-  const reason = new Error("cancelled");
+  const reason = Object.assign(new Error("cancelled"), { name: "AbortError" });
   controller.abort(reason);
-  filesystem.readFile.mockRejectedValueOnce(
-    Object.assign(new Error("aborted"), { name: "AbortError" }),
-  );
-  await expect(
-    host.processIdentities?.([entry], controller.signal),
-  ).rejects.toMatchObject({ name: "AbortError" });
-
+  expect(() => host.observe(controller.signal)).toThrow(reason);
+  expect(host.readStat).not.toHaveBeenCalled();
   const afterProbe = new AbortController();
-  const probeAbort = vi.spyOn(process, "kill").mockImplementation(() => {
+  host.readStat.mockImplementationOnce(() => {
+    throw filesystemError("ENOENT");
+  });
+  host.probe.mockImplementationOnce(() => {
     afterProbe.abort(reason);
     throw filesystemError("ESRCH");
   });
+  expect(() => host.observe(afterProbe.signal)).toThrow(reason);
+});
+
+it("preserves native generation, lifecycle, and relation without consulting process rows", () => {
+  const fields = [
+    "Z",
+    "7",
+    "8",
+    "9",
+    ...Array.from({ length: 15 }, () => "0"),
+    "123",
+  ];
+  const host = fixture();
+  host.readStat.mockReturnValueOnce(`42 (fixture ) old) ${fields.join(" ")}`);
+  expect(host.observe()).toEqual({
+    state: "readable",
+    identity: "linux-starttime:123",
+    lifecycle: { state: "observed", lifecycle: "zombie" },
+    relation: { state: "observed", parentPid: 7, processGroupId: 8 },
+  });
+  host.readStat.mockReturnValueOnce(`43 (fixture) ${fields.join(" ")}`);
+  expect(host.observe()).toEqual({
+    state: "unavailable",
+    reason: "malformed_proc_stat",
+  });
+  expect(host.probe).not.toHaveBeenCalled();
+});
+
+it("preserves exact cancellation when a successful native read completes after abort", () => {
+  const host = fixture();
+  const controller = new AbortController();
+  const reason = { caller: "native identity cancellation" };
+  host.readStat.mockImplementationOnce(() => {
+    controller.abort(reason);
+    return "ignored";
+  });
+  let caught: unknown;
   try {
-    filesystem.readFile.mockRejectedValueOnce(filesystemError("ENOENT"));
-    await expect(
-      host.processIdentities?.([entry], afterProbe.signal),
-    ).rejects.toBe(reason);
-  } finally {
-    probeAbort.mockRestore();
+    host.observe(controller.signal);
+  } catch (cause) {
+    caught = cause;
   }
+  expect(caught).toBe(reason);
+  expect(host.probe).not.toHaveBeenCalled();
 });

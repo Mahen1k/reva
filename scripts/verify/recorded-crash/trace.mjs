@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { readdir, readFile, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { runOwnedCommand } from "../../../dist/process/OwnedCommand.js";
+import { verifyHistoricalPidReads } from "./trace-ownership.mjs";
 
 /** Check attempted syscalls, including failed attempts, on a recorded PID that collides with an owned live sentinel. */
 export async function verifyCoreInspectionTrace({
@@ -15,6 +16,13 @@ export async function verifyCoreInspectionTrace({
 }) {
   const gdb = await realpath(environment.REA_PWNDBG_GDB);
   const python = await realpath(environment.REA_PWNTOOLS_PYTHON);
+  const node = await realpath(process.execPath);
+  const identityHelper = await realpath(
+    resolve(
+      dirname(await realpath(entrypoint)),
+      "../dist/process/LinuxProcessIdentityObserverMain.js",
+    ),
+  );
   const plugin = resolve(environment.REA_PWNDBG_GDBINIT, "..");
   const helperPaths = (name) =>
     new Set([
@@ -54,7 +62,7 @@ export async function verifyCoreInspectionTrace({
           "-s",
           "8192",
           "-e",
-          "trace=%process,%network,%file,ptrace,process_vm_readv,process_vm_writev",
+          "trace=%process,%network,%file,ptrace,process_vm_readv,process_vm_writev,getdents64",
           "-o",
           prefix,
           process.execPath,
@@ -68,11 +76,27 @@ export async function verifyCoreInspectionTrace({
       { timeoutMs: 90_000, diagnosticBytes: 1024 * 1024 },
     );
     const executions = [];
-    const ownershipReads = [];
+    const tracePrefix = `inspection-${mode}.trace.`;
+    const traces = await Promise.all(
+      (await readdir(root))
+        .filter((file) => file.startsWith(tracePrefix))
+        .map(async (file) => {
+          const pid = Number(file.slice(tracePrefix.length));
+          assert.ok(
+            Number.isSafeInteger(pid) && pid > 0,
+            `Invalid trace actor: ${file}`,
+          );
+          return { pid, file, text: await readFile(join(root, file), "utf8") };
+        }),
+    );
+    const ownershipReads = verifyHistoricalPidReads(traces, {
+      sentinelPid: sentinel.pid,
+      psPaths,
+      identityExecutable: node,
+      identityHelper,
+    });
     let gdbObserved = false;
-    for (const file of await readdir(root)) {
-      if (!file.startsWith(`inspection-${mode}.trace.`)) continue;
-      const text = await readFile(join(root, file), "utf8");
+    for (const { file, text } of traces) {
       // Keep the source executable present: GDB 16 otherwise silently hides a
       // core-only violation when its automatic executable lookup finds nothing.
       const recordedExecutable = JSON.stringify(join(root, "fixture-program"));
@@ -80,36 +104,6 @@ export async function verifyCoreInspectionTrace({
         !text.split("\n").some((line) => line.includes(recordedExecutable)),
         `Inspection attempted access to the recorded executable: ${file}`,
       );
-      const ownershipTrace = text
-        .split("\n")
-        .some(
-          (line) =>
-            /^execve\("\/(?:usr\/)?bin\/ps",/u.test(line) &&
-            line.includes(
-              '["ps", "-axo", "pid=,ppid=,pgid=,uid=,stat=,command="]',
-            ) &&
-            line.endsWith(" = 0"),
-        );
-      const pidReads = text
-        .split("\n")
-        .filter((line) => line.includes(`/proc/${sentinel.pid}/`));
-      if (ownershipTrace) {
-        for (const line of pidReads) {
-          assert.ok(
-            new RegExp(
-              `/proc/${sentinel.pid}/(?:stat|status|cmdline|wchan|environ)"`,
-              "u",
-            ).test(line),
-            `Unexpected ownership observation of the sentinel: ${line}`,
-          );
-          ownershipReads.push(line);
-        }
-      } else
-        assert.deepEqual(
-          pidReads,
-          [],
-          `Historical PID caused a provider lookup in ${file}: ${pidReads.join("\n")}`,
-        );
       assert.ok(
         !/\bptrace\(/u.test(text),
         `Inspection attempted ptrace: ${file}`,
@@ -157,7 +151,7 @@ export async function verifyCoreInspectionTrace({
               "]",
           );
         assert.ok(
-          [process.execPath, python, gdb].includes(executable) ||
+          [node, python, gdb].includes(executable) ||
             ownership ||
             iconv ||
             version,
@@ -175,7 +169,12 @@ export async function verifyCoreInspectionTrace({
       executions,
       historical_pid: sentinel.pid,
       sentinel: "still-alive",
-      ownership_process_table_reads: ownershipReads,
+      ownership_process_table_reads: ownershipReads
+        .filter((read) => read.observer === "process-table")
+        .map((read) => read.syscall),
+      ownership_native_identity_reads: ownershipReads.filter(
+        (read) => read.observer === "native-identities",
+      ),
     });
   }
   return observations;

@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { parseLinuxProcessStat } from "./LinuxProcessStat.js";
+import { readLinuxProcessIdentities } from "./LinuxProcessIdentityReader.js";
 import { AnalysisCapabilityUnavailableError } from "../domain/analysisErrorCore.js";
 
 import { launcherIdentityFailure } from "./ProcessOwnershipIdentity.js";
@@ -702,91 +702,7 @@ export const createSystemProcessOwnershipHost = (
   > = async (processes, signal) => {
     if (processes.length === 0) return new Map();
     if (platform === "linux")
-      return new Map<number, ProcessIdentityObservation>(
-        await Promise.all(
-          processes.map(async ({ pid }) => {
-            if (!Number.isSafeInteger(pid) || pid <= 0)
-              return [
-                pid,
-                { state: "unavailable", reason: "invalid_process_id" } as const,
-              ] as const;
-            try {
-              const stat = await readFile(`/proc/${String(pid)}/stat`, {
-                encoding: "utf8",
-                ...(signal === undefined ? {} : { signal }),
-              });
-              const parsed = parseLinuxProcessStat(stat);
-              return [
-                pid,
-                parsed === undefined || parsed.pid !== pid
-                  ? ({
-                      state: "unavailable",
-                      reason: "malformed_proc_stat",
-                    } as const)
-                  : ({
-                      state: "readable",
-                      identity: `linux-starttime:${parsed.startTime}`,
-                      lifecycle: {
-                        state: "observed",
-                        lifecycle: parsed.lifecycle,
-                      },
-                      relation: {
-                        state: "observed",
-                        parentPid: parsed.parentPid,
-                        processGroupId: parsed.processGroupId,
-                      },
-                    } as const),
-              ] as const;
-            } catch (cause: unknown) {
-              if (isExpectedAbort(cause, signal)) throw cause;
-              if (
-                cause instanceof Error &&
-                "code" in cause &&
-                (cause.code === "ENOENT" || cause.code === "ESRCH")
-              ) {
-                signal?.throwIfAborted();
-                let presenceProbeFailure: unknown;
-                let presenceProbeSucceeded = false;
-                try {
-                  presenceProbeSucceeded = process.kill(pid, 0);
-                } catch (probeCause: unknown) {
-                  presenceProbeFailure = probeCause;
-                }
-                signal?.throwIfAborted();
-                if (
-                  presenceProbeFailure instanceof Error &&
-                  "code" in presenceProbeFailure &&
-                  presenceProbeFailure.code === "ESRCH"
-                )
-                  return [
-                    pid,
-                    {
-                      state: "absent",
-                      reason: "not-found-in-caller-pid-namespace",
-                    } as const,
-                  ] as const;
-                return [
-                  pid,
-                  {
-                    state: "unavailable",
-                    reason:
-                      presenceProbeFailure === undefined &&
-                      presenceProbeSucceeded
-                        ? "proc_stat_missing_but_process_signal_probe_succeeded"
-                        : presenceProbeFailure === undefined
-                          ? "proc_stat_missing_and_process_signal_probe_returned_false"
-                          : `proc_stat_missing_and_process_signal_probe_failed: ${errorMessage(presenceProbeFailure)}`,
-                  } as const,
-                ] as const;
-              }
-              return [
-                pid,
-                { state: "unavailable", reason: errorMessage(cause) } as const,
-              ] as const;
-            }
-          }),
-        ),
-      );
+      return readLinuxProcessIdentities(processes, hostEnvironment, signal);
     if (darwinTokens === undefined) return new Map();
     try {
       return await darwinTokens.identities(processes, signal);
