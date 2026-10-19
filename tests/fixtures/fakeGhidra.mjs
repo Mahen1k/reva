@@ -243,6 +243,9 @@ const handleRequest = (socket, server, request, state) => {
             }),
       })}\n`,
     );
+    // Acknowledging shutdown is not proof the JVM finished saving. This mode
+    // keeps running until the client stops it so publication must be skipped.
+    if (state.mode === "ack_without_exit") return;
     server.close(() => process.exit(0));
   }
 };
