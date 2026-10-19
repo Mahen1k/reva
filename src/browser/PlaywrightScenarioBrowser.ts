@@ -25,6 +25,10 @@ import {
   withPlaywrightExecutionBoundary,
   PLAYWRIGHT_CLEANUP_CONFIRMATION_TIMEOUT_MS,
 } from "./PlaywrightExecutionBoundary.js";
+import {
+  reclaimStaleScenarioProfiles,
+  writeScenarioProfileOwner,
+} from "./ScenarioProfileReclamation.js";
 
 const OPERATION = "capture_browser_scenario" as const;
 
@@ -675,10 +679,16 @@ export const openPlaywrightScenarioBrowser = async (
       options.retainCleanup,
     );
 
+  // Reclaim what a terminated earlier run could not remove; a profile another
+  // live owner still holds is left in place. Best effort: reclamation never
+  // blocks the scenario the caller asked for.
+  await reclaimStaleScenarioProfiles().catch(() => undefined);
   const profilePath = await mkdtemp(join(tmpdir(), "rea-browser-scenario-"));
   let context: BrowserContext;
   try {
     await chmod(profilePath, 0o700);
+    // Record this owner so a later run can prove this profile is stale.
+    await writeScenarioProfileOwner(profilePath).catch(() => undefined);
     context = await launcher.launchPersistentContext(profilePath, {
       executablePath: resolve(scenario.browser.executable_path),
       headless: scenario.browser.headless,

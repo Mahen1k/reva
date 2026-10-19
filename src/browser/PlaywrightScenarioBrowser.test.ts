@@ -2,10 +2,26 @@ import { AnalysisError } from "../domain/analysisErrorBase.js";
 import { AnalysisCleanupLease } from "../artifacts/AnalysisCleanupLease.js";
 import { AnalysisCancelledError } from "../domain/analysisErrorCore.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
-import { afterEach, expect, it, vi } from "vitest";
-import { mkdir, writeFile, rm, access } from "node:fs/promises";
+import { afterEach, expect, it, vi, onTestFinished } from "vitest";
+import {
+  mkdir,
+  writeFile,
+  rm,
+  access,
+  lstat,
+  realpath,
+} from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestTempDirectory } from "../../tests/fixtures/temporaryDirectory.js";
+import {
+  SCENARIO_PROFILE_OWNER_FILE,
+  SCENARIO_PROFILE_PREFIX,
+  writeScenarioProfileOwner,
+} from "./ScenarioProfileReclamation.js";
 import type {
   Browser,
   BrowserContext,
@@ -22,6 +38,13 @@ import {
 } from "./PlaywrightScenarioBrowser.js";
 
 const hostPlatform = process.platform;
+
+// lstat never follows a link, so the assertion cannot pass on a dangling link.
+const exists = (path: string): Promise<boolean> =>
+  lstat(path).then(
+    () => true,
+    () => false,
+  );
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -780,4 +803,51 @@ it("bounds an opening failure response while retaining the same late cleanup lea
     await lease.release();
     vi.useRealTimers();
   }
+});
+
+it("reclaims a terminated run's profile and records this one before launching", async () => {
+  const stale = join(
+    await realpath(tmpdir()),
+    `${SCENARIO_PROFILE_PREFIX}${randomUUID()}`,
+  );
+  await mkdir(stale, { recursive: true });
+  const exited = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  const ownerPid = exited.pid;
+  if (ownerPid === undefined) throw new Error("Expected a child process id");
+  await once(exited, "exit");
+  await writeScenarioProfileOwner(stale, { pid: ownerPid });
+  onTestFinished(async () => {
+    await rm(stale, { recursive: true, force: true });
+  });
+
+  const scenario = browserScenarioSchema.parse({
+    browser: { mode: "launch", executable_path: process.execPath },
+    start_url: { url: "https://example.test" },
+    actions: [
+      { step_id: "settle", action: "wait_for_timeout", duration_ms: 1 },
+    ],
+  });
+  let recorded = false;
+  await expect(
+    openPlaywrightScenarioBrowser(
+      scenario,
+      {},
+      {
+        launcher: {
+          connectOverCDP: async () => {
+            throw new Error("Unexpected connection");
+          },
+          launchPersistentContext: async (profilePath) => {
+            recorded = await exists(
+              join(profilePath, SCENARIO_PROFILE_OWNER_FILE),
+            );
+            throw new Error("launch boundary reached");
+          },
+        },
+      },
+    ),
+  ).rejects.toThrow("launch boundary reached");
+
+  expect(recorded).toBe(true);
+  await expect(exists(stale)).resolves.toBe(false);
 });

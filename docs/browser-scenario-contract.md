@@ -147,7 +147,12 @@ confirms that an attached external browser remains alive.
 That cleanup requires REA to remain running. Abrupt termination, including
 Windows process-tree termination or POSIX `SIGKILL`, can leave the launch
 profile and Playwright artifacts behind. A profile can retain cookies, history,
-cache and origin storage. Later REA runs currently do not reclaim these paths.
+cache and origin storage. Each launch records its owning process inside the
+profile, and a later launch reclaims profiles whose recorded owner is gone and
+whose Chromium singleton entries do not establish a live browser. A profile a
+running browser still holds, and every directory without that owner marker,
+remains in place. Playwright artifacts directories cannot be attributed this way
+and can still be left behind after abrupt termination.
 Playwright 1.58.2 can also leave an artifacts directory when launch preparation
 fails before a browser process exists, such as for a missing executable.
 POSIX wrappers can request awaited cancellation with `SIGINT` or `SIGTERM`;
