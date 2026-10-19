@@ -1,6 +1,38 @@
 import { expect, it } from "vitest";
 
-import { assertHistoricalPidReadsAreOwnershipOnly } from "../../../scripts/verify/recorded-crash/trace-ownership.mjs";
+import {
+  assertHistoricalPidAccess,
+  ownershipInventory,
+} from "../../../scripts/verify/recorded-crash/trace-policy.mjs";
+
+const assertHistoricalPidReadsAreOwnershipOnly = (input: {
+  readonly traces: readonly { readonly pid: number; readonly text: string }[];
+  readonly sentinelPid: number;
+  readonly psExecutables: ReadonlySet<string>;
+}) => {
+  const traces = input.traces.map((trace) =>
+    trace.pid === 1200
+      ? {
+          ...trace,
+          text: 'execve("/fixture/node", ["node"], 0x1) = 0\n' + trace.text,
+        }
+      : trace,
+  );
+  const { nodeThreads, psPids } = ownershipInventory(
+    traces,
+    "/fixture/node",
+    input.psExecutables,
+  );
+  return traces.flatMap((trace) =>
+    assertHistoricalPidAccess({
+      trace,
+      historicalPid: input.sentinelPid,
+      nodeThreads,
+      liveCollision: true,
+      psInventory: psPids.has(trace.pid),
+    }),
+  );
+};
 
 const psExec =
   'execve("/usr/bin/ps", ["ps", "-axo", "pid=,ppid=,pgid=,uid=,stat=,command="], 0x7fff) = 0';
@@ -63,7 +95,7 @@ it("joins unfinished and resumed CLONE_THREAD records", () => {
   expect(ownershipReads).toHaveLength(1);
 });
 
-it("rejects provider-style reads outside the ps child and stat-only caller", () => {
+it("rejects provider-style reads outside the ps child and stat/status caller", () => {
   const traces = [
     {
       pid: 1200,
@@ -81,7 +113,7 @@ it("rejects provider-style reads outside the ps child and stat-only caller", () 
       sentinelPid: 4008,
       psExecutables: new Set(["/usr/bin/ps"]),
     }),
-  ).toThrow("Historical PID caused a provider lookup");
+  ).toThrow("Historical PID caused a non-inventory lookup");
 });
 
 it("does not trust a ps command with different arguments or failed exec", () => {
@@ -101,7 +133,7 @@ it("does not trust a ps command with different arguments or failed exec", () => 
           { pid: 1201, text },
         ],
       }),
-    ).toThrow("Historical PID caused a provider lookup");
+    ).toThrow("Historical PID caused a non-inventory lookup");
 });
 
 it("allows only known procfs fields inside the exact ps child", () => {
@@ -117,7 +149,7 @@ it("allows only known procfs fields inside the exact ps child", () => {
         },
       ],
     }),
-  ).toThrow("Historical PID caused a provider lookup");
+  ).toThrow("Historical PID caused a non-inventory lookup");
 });
 
 it("does not grant the ownership process thread permit to a forked child", () => {
@@ -140,5 +172,5 @@ it("does not grant the ownership process thread permit to a forked child", () =>
           },
         ],
       }),
-    ).toThrow("Historical PID caused a provider lookup");
+    ).toThrow("Historical PID caused a non-inventory lookup");
 });

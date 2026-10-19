@@ -105,6 +105,25 @@ GDB/Python/pwndbg/strace. Fixture generation explicitly launches its owned test
 program; subsequent inspection only reads the resulting core. Real acceptance
 checks recorded threads, high registers, missing/malformed notes, opaque owners,
 CLI/MCP parity, optional debugger context and historical PID collision with an
-owned live sentinel. The syscall trace also rejects access to the still-present
+owned live sentinel. Observed Node callers of the exact process-table command
+and their traced threads may read that live process's `stat` and `status` for
+the shared ownership inventory; debugger and decoder processes cannot use this
+exception. A same-thread-group read's purpose cannot be established by strace. A second recording uses a valid
+historical PID above the host's assignable PID range and rejects resolved lookups,
+including Node `stat` reads, to detect historical-PID-driven access separately
+from live inventory. Descriptor paths come from strace's `-yy` decoding; exact
+PID-directory opens and relative accesses through those handles are rejected.
+Failed FD-relative pathname attempts are checked across syscall variants.
+Legacy relative pathname calls without dirfd/cwd evidence and symlink aliases
+remain unverified; the verification report declares these gaps rather than
+establishing their absence.
+One syscall/selector contract supplies trace selection, target interpretation
+and the report's explicit coverage catalog. Unlisted PID-directed syscalls remain
+unverified. The catalog includes PID-directed resource
+limits, scheduling, priority, process metadata, signals and pidfd controls.
+Self, group and UID selectors retain their syscall-defined meanings; unresolved
+targets cannot qualify. Coverage is reported once for all CLI/MCP traces and
+does not establish containment of every possible kernel interaction.
+The syscall trace also rejects access to the still-present
 source executable. The CI workflow defines Ubuntu 24.04 and Debian 13 (GDB 16)
 container lanes. Original inputs and host configuration remain unchanged.

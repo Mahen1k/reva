@@ -1289,24 +1289,15 @@ const scanWithOwnershipEvidence = async (
     observationRows,
     host,
   );
-  const baselineIdentityFailures = new Map<
-    number,
-    ProcessOwnershipValidationFailure
-  >();
   const candidates = observationRows.filter((process) => {
     if (retainedPids.has(process.pid)) return true;
     if (!baseline.has(process.pid)) return true;
     const before = baseline.get(process.pid);
     const now = firstIdentities.get(process.pid);
     if (before === null || now?.state !== "readable") {
-      baselineIdentityFailures.set(process.pid, {
-        pid: process.pid,
-        reason: "process-identity-unavailable",
-        diagnostic: "process identity was unavailable during token validation",
-      });
-      // Keep the row in the owning fact pass. The failure is not evidence that
-      // the process is absent, and a related unknown generation must survive
-      // a later process-table omission.
+      // Baseline identity only selects rows for current validation. Let the
+      // owning fact pass distinguish confirmed absence, a current foreign
+      // generation and unresolved identity; a baseline miss is not a failure.
       return true;
     }
     return now.identity !== before;
@@ -1365,8 +1356,6 @@ const scanWithOwnershipEvidence = async (
     // token became unreadable while exiting. Unknown native state stays a
     // cleanup failure; table omission alone is never proof of exit.
     if (processIdentityHasExited(fact.identityAfter)) continue;
-    const baselineFailure = baselineIdentityFailures.get(fact.process.pid);
-    if (baselineFailure !== undefined) failures.push(baselineFailure);
     if (fact.state === "replaced")
       failures.push({
         pid: fact.process.pid,
