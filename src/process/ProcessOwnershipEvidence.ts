@@ -22,6 +22,7 @@ export interface RetainedProcessOwnershipCandidate {
     | "capture-leader-pid"
     | "captured-process-group-id"
     | "native-identity-unresolved"
+    | "unverified-table-relation"
     | "previously-related-generation";
   readonly token: ProcessRunTokenObservation;
   readonly relation:
@@ -80,6 +81,11 @@ export class ProcessOwnershipEvidenceOwner {
       readonly processGroupIds: ReadonlySet<number>;
       /** First identity/token/identity result before bounded token-only retries. */
       readonly scopeFacts?: readonly ProcessOwnershipFact[];
+      /** Caller-selected lineage links preserve uncertain scope, never ownership proof. */
+      readonly unverifiedLineageRelations?: ReadonlyMap<
+        number,
+        Pick<ProcessTableEntry, "parentPid" | "processGroupId">
+      >;
     },
   ): readonly RetainedProcessOwnershipCandidate[] {
     this.#snapshotCount += 1;
@@ -125,33 +131,54 @@ export class ProcessOwnershipEvidenceOwner {
           "run-token" | "previously-related-generation"
         >
       | undefined => {
-      const identity = generations.get(pid);
-      if (identity === undefined) return undefined;
-      const relation =
-        identity.relation?.state === "observed" ? identity.relation : undefined;
+      let unverifiedRelation = false;
+      const relationFor = (candidatePid: number) => {
+        const identity = generations.get(candidatePid);
+        if (identity?.relation?.state === "observed") return identity.relation;
+        const fallback = options.unverifiedLineageRelations?.get(candidatePid);
+        if (fallback === undefined) return undefined;
+        const current = factsByPid.get(candidatePid)?.identityAfter;
+        // A fresh native relation can disprove the earlier table scope. Never
+        // substitute the table link once that relation is available.
+        if (
+          current?.state === "readable" &&
+          current.relation?.state === "observed"
+        ) {
+          if (identity === undefined) unverifiedRelation = true;
+          return current.relation;
+        }
+        unverifiedRelation = true;
+        return fallback;
+      };
+      const scoped = (
+        evidence:
+          | "captured-process-group-id"
+          | "capture-leader-pid"
+          | "current-token-owned-parent",
+      ) =>
+        unverifiedRelation ? ("unverified-table-relation" as const) : evidence;
+      const relation = relationFor(pid);
       if (relation === undefined) return undefined;
       if (options.processGroupIds.has(relation.processGroupId))
-        return "captured-process-group-id";
+        return scoped("captured-process-group-id");
       const visited = new Set<number>([pid]);
       let parentPid = relation.parentPid;
       while (!visited.has(parentPid)) {
         const parent = generations.get(parentPid);
-        if (parent === undefined) {
-          return parentPid === options.leaderPid
-            ? "capture-leader-pid"
-            : undefined;
-        }
         const previousParent = this.#candidates.get(parentPid);
         if (
-          tokenOwners.has(parentPid) ||
-          (previousParent?.applicability === "token-verified" &&
-            parent.identity === previousParent.identity)
+          parent !== undefined &&
+          (tokenOwners.has(parentPid) ||
+            (previousParent?.applicability === "token-verified" &&
+              parent.identity === previousParent.identity))
         )
-          return "current-token-owned-parent";
-        if (parentPid === options.leaderPid) return "capture-leader-pid";
+          return scoped("current-token-owned-parent");
+        if (parentPid === options.leaderPid)
+          return scoped("capture-leader-pid");
         visited.add(parentPid);
-        if (parent.relation?.state !== "observed") return undefined;
-        parentPid = parent.relation.parentPid;
+        const parentRelation = relationFor(parentPid);
+        if (parentRelation === undefined) return undefined;
+        parentPid = parentRelation.parentPid;
       }
       return undefined;
     };

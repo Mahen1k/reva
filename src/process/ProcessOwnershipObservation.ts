@@ -291,6 +291,46 @@ const observeNativeOwnedProcessLineage = async (
 ): Promise<ProcessLineageObservation> => {
   const initialIdentities = await readNativeProcessIdentityMap(processes, host);
   const launcher = processes.find(({ pid }) => pid === ownership.leaderPid);
+  // Missing native facts leave table ancestry as candidate scope only. Keep
+  // unresolved and exited intermediates as discovery bridges to descendants;
+  // only validated live native facts may authorize the published lineage.
+  const candidateProcesses = processes.map((process) => {
+    const identity = initialIdentities.get(process.pid);
+    const nativeProcess =
+      identity?.state === "readable"
+        ? processWithNativeRelation(process, identity)
+        : undefined;
+    return nativeProcess ?? process;
+  });
+  const descendants = descendantsOf([ownership.leaderPid], candidateProcesses);
+  const candidates = [
+    ...(launcher === undefined ? [] : [launcher]),
+    ...descendants,
+  ];
+  const facts = await readProcessOwnershipFacts(candidates, host, undefined, {
+    identityBefore: initialIdentities,
+  });
+  // Preserve each generation's ownership evidence before projecting a lineage.
+  // A later candidate failure or a smaller future lineage cannot erase a
+  // token-verified helper that has since detached from this launcher.
+  ownership.evidenceOwner?.reconcile(facts, {
+    runId: ownership.runId,
+    listedRows: processes.length,
+    listedPids: new Set(processes.map(({ pid }) => pid)),
+    leaderPid: ownership.leaderPid,
+    processGroupIds: new Set([
+      ownership.processGroupId,
+      ...(ownership.sampledProcessGroupIds ?? []),
+    ]),
+    unverifiedLineageRelations: new Map(
+      candidates.map(({ pid, parentPid, processGroupId }) => [
+        pid,
+        { parentPid, processGroupId },
+      ]),
+    ),
+  });
+  // A launcher failure prevents publication, but must not discard partial
+  // ownership evidence already observed for this run's descendants.
   if (launcher === undefined)
     return unavailableLineage(ownership, "owned launcher is not live");
   const launcherIdentity = initialIdentities.get(launcher.pid);
@@ -315,39 +355,6 @@ const observeNativeOwnedProcessLineage = async (
   const identityFailure = launcherIdentityFailure(nativeLauncher, ownership);
   if (identityFailure !== null)
     return unavailableLineage(ownership, identityFailure);
-
-  const nativeProcesses = processes.flatMap((process) => {
-    const identity = initialIdentities.get(process.pid);
-    if (
-      identity?.state === "readable" &&
-      identity.lifecycle?.state === "observed" &&
-      identity.lifecycle.lifecycle === "zombie"
-    )
-      return [];
-    const nativeProcess =
-      identity?.state === "readable"
-        ? processWithNativeRelation(process, identity)
-        : undefined;
-    return nativeProcess === undefined ? [] : [nativeProcess];
-  });
-  const descendants = descendantsOf([ownership.leaderPid], nativeProcesses);
-  const candidates = [nativeLauncher, ...descendants];
-  const facts = await readProcessOwnershipFacts(candidates, host, undefined, {
-    identityBefore: initialIdentities,
-  });
-  // Preserve each generation's ownership evidence before projecting a lineage.
-  // A later candidate failure or a smaller future lineage cannot erase a
-  // token-verified helper that has since detached from this launcher.
-  ownership.evidenceOwner?.reconcile(facts, {
-    runId: ownership.runId,
-    listedRows: processes.length,
-    listedPids: new Set(processes.map(({ pid }) => pid)),
-    leaderPid: ownership.leaderPid,
-    processGroupIds: new Set([
-      ownership.processGroupId,
-      ...(ownership.sampledProcessGroupIds ?? []),
-    ]),
-  });
   const factsByPid = new Map(facts.map((fact) => [fact.process.pid, fact]));
   const verifiedDescendants: ProcessTableEntry[] = [];
   let currentLauncher = nativeLauncher;
