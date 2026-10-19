@@ -372,7 +372,9 @@ const writeStagedParts = async (
 
 const assertWriteActive = (cancellation?: TextWriteCancellation): void => {
   if (cancellation?.signal.aborted === true)
-    throw new AnalysisCancelledError(cancellation.operation);
+    throw new AnalysisCancelledError(cancellation.operation, {
+      cause: cancellation.signal.reason,
+    });
 };
 
 const fileErrorCode = (cause: unknown): unknown =>

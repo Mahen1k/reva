@@ -1,6 +1,9 @@
 import { z } from "incur";
 
 import { inspectAnalysisViewValidated } from "../application/analysisView/AnalysisViewService.js";
+import { inspectAnalysisViewFromBundle } from "../application/EvidenceBundleCommands.js";
+import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
+import { ANALYSIS_VIEW_PROVIDER } from "../application/InvestigationProviders.js";
 import { readEvidenceBundle } from "../application/EvidenceBundleFiles.js";
 import { inspectEvidenceBundle } from "../application/investigation/InspectEvidenceBundle.js";
 import {
@@ -15,6 +18,9 @@ import { analysisInputErrorFromIssues } from "../domain/inputIssueProjection.js"
 import { jsonValueSchema } from "../domain/jsonValue.js";
 import type { Logger } from "pino";
 import type { CliInstance } from "./types.js";
+import { localPathStringSchema } from "../domain/localPath.js";
+import { withCommandCancellation } from "./commandCancellation.js";
+import { finishAnalysisCommand } from "./finishAnalysisCommand.js";
 
 import { inspectAnalysisViewInputSchema } from "../domain/analysisView/analysisView.js";
 /** Project selected views of completed analysis Evidence through the CLI. */
@@ -75,7 +81,14 @@ export const registerAnalysisViewCommands = (
     args: z.object({
       inputJson: z.string().describe("Inline workflow JSON or JSON file path"),
     }),
-    run: ({ args }) =>
+    options: z.object({
+      evidenceBundle: localPathStringSchema
+        .optional()
+        .describe(
+          "Read the exact retained-evidence source ID from this local Evidence bundle without reopening the target; omit for inline Evidence",
+        ),
+    }),
+    run: ({ args, options }) =>
       logCliCommand(logger, CLI_COMMANDS.inspectAnalysisView, async () => {
         const input = await parseCliJsonInput(
           args.inputJson,
@@ -94,6 +107,25 @@ export const registerAnalysisViewCommands = (
               ),
             ),
           };
+        if (options.evidenceBundle !== undefined) {
+          const resources = new ArtifactResourceScope();
+          const path = options.evidenceBundle;
+          return withCommandCancellation((signal) =>
+            finishAnalysisCommand(
+              () =>
+                inspectAnalysisViewFromBundle(
+                  parsed.data,
+                  path,
+                  resources,
+                  signal,
+                ),
+              resources,
+              ANALYSIS_VIEW_PROVIDER.id,
+              "inspect_analysis_view",
+              signal,
+            ),
+          );
+        }
         const result = inspectAnalysisViewValidated(parsed.data);
         return result.ok
           ? jsonValueSchema.parse(result.value)
