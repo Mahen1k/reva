@@ -334,6 +334,13 @@ whose content types are JSON-like. Every other group is listed under
 `excluded` with reason `other-origin`, `ui-page-or-asset` or `non-json`, and
 retained records without a usable request line are counted in a limitation.
 
+The parent may instead be `capture_browser_scenario` Evidence whose scenario
+selected response bodies or header values: each network transaction is then
+one record, in request order, and the result names
+`parent_operation: "capture_browser_scenario"` with an empty `artifact`, since
+a scenario records no file. See
+[agent environments](agent-environments.md#from-a-browser-scenario).
+
 ```json
 {
   "name": "inspect_analysis_view",

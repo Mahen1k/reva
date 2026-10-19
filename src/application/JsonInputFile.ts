@@ -33,13 +33,17 @@ const PACKED_TOKEN_PART_CODE_UNITS = 64 * 1024;
 // This selects an implementation; larger files remain accepted through streaming.
 const NATIVE_PARSE_READ_BUDGET = 8 * 1024 * 1024;
 
-/** Keep native parsing only when input copies and value expansion fit live headroom. */
-const nativeParseFits = (inputBytes: number): boolean =>
-  inputBytes <= NATIVE_PARSE_READ_BUDGET &&
+/** Heap a whole-file native JSON.parse may need: the assembler's 64x container expansion plus byte and text copies. */
+export const nativeJsonParseRequiredBytes = (inputBytes: number): number =>
   // The assembler estimate reserves up to 128 bytes per two-byte container.
   // Allow that 64x expansion plus byte/text copies before native JSON.parse,
   // whose individual container allocations cannot be intercepted.
-  inputBytes * 72 + READ_CHUNK_BYTES <=
+  inputBytes * 72 + READ_CHUNK_BYTES;
+
+/** Keep native parsing only when input copies and value expansion fit live headroom. */
+const nativeParseFits = (inputBytes: number): boolean =>
+  inputBytes <= NATIVE_PARSE_READ_BUDGET &&
+  nativeJsonParseRequiredBytes(inputBytes) <=
     getHeapStatistics().total_available_size;
 
 /** One selected root member; repeated keys begin again with last-value semantics. */

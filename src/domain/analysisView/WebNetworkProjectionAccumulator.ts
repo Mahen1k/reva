@@ -107,7 +107,7 @@ export const admitHarCaptureParent = (
     );
   if (parent.operation !== "inspect_web_network_capture")
     return unsupported(
-      `View ${viewKind} is unsupported for parent operation ${parent.operation}; ${viewKind} requires inspect_web_network_capture.`,
+      `View ${viewKind} is unsupported for parent operation ${parent.operation}; ${viewKind} requires ${viewKind === "environment-manifest" ? "inspect_web_network_capture or capture_browser_scenario" : "inspect_web_network_capture"}.`,
     );
   const admitted = accumulator.admitCaptureClone(parent.normalizedResult);
   if (!admitted.ok) return admitted;

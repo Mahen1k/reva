@@ -507,7 +507,10 @@ export const analysisViewResultSchema = z.discriminatedUnion("kind", [
     ...viewResultBase,
     ...environmentManifestFields,
     kind: z.literal("environment-manifest"),
-    parent_operation: z.literal("inspect_web_network_capture"),
+    parent_operation: z.enum([
+      "inspect_web_network_capture",
+      "capture_browser_scenario",
+    ]),
     view: environmentManifestViewRequestSchema,
   }),
   z.strictObject({
