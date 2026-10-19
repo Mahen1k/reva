@@ -42,6 +42,7 @@ describe("ZCode configuration paths", () => {
       displayName: "ZCode",
       configPath: join("/home/a", ".zcode", "cli", "config.json"),
       markerPath: join("/home/a", ".zcode", "cli"),
+      discoveryPaths: [join("/home/a", ".zcode", "cli")],
       format: "zcode",
       zcodeFallbackPath: join("/home/a", ".agents", "mcp.json"),
     });
