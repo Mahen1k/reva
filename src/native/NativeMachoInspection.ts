@@ -276,7 +276,7 @@ const normalizeMacho = (
       : []),
   ];
   return inspectMachoSchema.parse({
-    format: "mach-o",
+    format: architectures.length > 1 ? "mach-o-universal" : "mach-o",
     selected_architecture: selectedArchitecture,
     endian: load.endian,
     word_size: load.wordSize,
