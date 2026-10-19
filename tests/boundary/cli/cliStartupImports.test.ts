@@ -114,6 +114,10 @@ const DEFERRED_IMPORTS = [
     name: "reconstruction-obligation-ledger",
     path: "/dist/application/ReconstructionObligationLedgerService.js",
   },
+  {
+    name: "environment-server",
+    path: "/dist/server/environment/serveEnvironment.js",
+  },
 ] as const;
 // Report each resolved deferred package on stderr without changing resolution.
 const RESOLUTION_HOOK = `data:text/javascript,${encodeURIComponent(`
@@ -235,12 +239,16 @@ describe("CLI startup imports", () => {
 });
 
 describe("MCP startup imports", () => {
-  it("does not load command-specific dependencies to initialize and list tools", async () => {
+  it("initializes and lists tools over stdio with HTTP-only environment settings present", async () => {
     const transport = new StdioClientTransport({
       command: process.execPath,
       args: [`--import=${RESOLUTION_HOOK}`, "scripts/rea.mjs", "mcp"],
       cwd: process.cwd(),
-      env: { PATH: process.env.PATH ?? "" },
+      env: {
+        PATH: process.env.PATH ?? "",
+        MCP_HOST: " ",
+        MCP_PORT: "not-a-port",
+      },
       stderr: "pipe",
     });
     let stderr = "";
@@ -258,6 +266,7 @@ describe("MCP startup imports", () => {
       await client.close();
     }
     const resolved = resolvedMarkers(stderr);
+    expect(stderr).not.toContain("MCP transport listening");
     expect(resolved).not.toContain("playwright-core");
     expect(resolved).not.toContain("isomorphic-git");
   });
