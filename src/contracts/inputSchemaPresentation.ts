@@ -9,19 +9,114 @@ import {
 const isObject = (value: unknown): value is Readonly<Record<string, unknown>> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-const resolveReference = (
+const literalSchemaType = (value: unknown): string | undefined => {
+  if (value === null) return "null";
+  if (typeof value === "string") return "string";
+  if (typeof value === "boolean") return "boolean";
+  if (typeof value === "number")
+    return Number.isInteger(value) ? "integer" : "number";
+  return undefined;
+};
+
+const resolvePointer = (
   root: Readonly<Record<string, unknown>>,
-  reference: string,
+  tokens: readonly string[],
 ): unknown => {
-  if (reference === "#") return root;
-  if (!reference.startsWith("#/")) return undefined;
   let value: unknown = root;
-  for (const token of reference.slice(2).split("/")) {
-    const key = token.replaceAll("~1", "/").replaceAll("~0", "~");
-    if (!isObject(value) || !Object.hasOwn(value, key)) return undefined;
-    value = value[key];
+  for (const token of tokens) {
+    // A pointer can cross a resource boundary; preserve the original
+    // projection rather than guess the reference scope beyond it.
+    if (value !== root && isObject(value) && "$id" in value) return undefined;
+    if (Array.isArray(value)) {
+      if (!/^(?:0|[1-9]\d*)$/u.test(token)) return undefined;
+      const index = Number(token);
+      if (index >= value.length) return undefined;
+      value = value[index];
+      continue;
+    }
+    if (!isObject(value) || !Object.hasOwn(value, token)) return undefined;
+    value = value[token];
   }
   return value;
+};
+
+const findSchemaAnchor = (
+  root: Readonly<Record<string, unknown>>,
+  name: string,
+): readonly string[] | undefined => {
+  const scan = (
+    node: unknown,
+    path: readonly string[],
+  ): readonly string[] | undefined => {
+    if (Array.isArray(node)) {
+      for (let index = 0; index < node.length; index += 1) {
+        const found = scan(node[index], [...path, String(index)]);
+        if (found !== undefined) return found;
+      }
+      return undefined;
+    }
+    if (!isObject(node)) return undefined;
+    // Draft 2020-12: a plain-name fragment matches $anchor or $dynamicAnchor.
+    if (node.$anchor === name || node.$dynamicAnchor === name) return path;
+    for (const [key, child] of Object.entries(node)) {
+      if (
+        !schemaMaps.has(key) &&
+        !schemaArrays.has(key) &&
+        !schemaChildren.has(key)
+      )
+        continue;
+      // Anchors inside a nested resource belong to that resource.
+      if (isObject(child) && "$id" in child) continue;
+      if (schemaMaps.has(key) && isObject(child)) {
+        for (const [childName, grandChild] of Object.entries(child)) {
+          const found = scan(grandChild, [...path, key, childName]);
+          if (found !== undefined) return found;
+        }
+      } else if (Array.isArray(child)) {
+        for (let index = 0; index < child.length; index += 1) {
+          const found = scan(child[index], [...path, key, String(index)]);
+          if (found !== undefined) return found;
+        }
+      } else {
+        const found = scan(child, [...path, key]);
+        if (found !== undefined) return found;
+      }
+    }
+    return undefined;
+  };
+  return scan(root, []);
+};
+
+/** Resolve a same-resource reference: `#`, pointer fragments, and anchors. */
+export const resolveLocalSchemaReference = (
+  root: Readonly<Record<string, unknown>>,
+  reference: string,
+): { readonly value: unknown; readonly tokens: readonly string[] } | undefined => {
+  if (!reference.startsWith("#")) return undefined;
+  // RFC 6901: percent-decode the whole fragment before splitting tokens, so
+  // an encoded separator such as %2F still addresses a nested position.
+  let fragment: string;
+  try {
+    fragment = decodeURIComponent(reference.slice(1));
+  } catch {
+    return undefined;
+  }
+  if (fragment === "") return { value: root, tokens: [] };
+  if (!fragment.startsWith("/")) {
+    // Draft 2020-12 plain-name fragments resolve to the matching $anchor.
+    const anchorPath = findSchemaAnchor(root, fragment);
+    if (anchorPath === undefined) return undefined;
+    const value = resolvePointer(root, anchorPath);
+    return value === undefined
+      ? undefined
+      : { value, tokens: anchorPath };
+  }
+  const tokens = fragment
+    .slice(1)
+    .split("/")
+    .map((token) => token.replaceAll("~1", "/").replaceAll("~0", "~"));
+  const value = resolvePointer(root, tokens);
+  return value === undefined ? undefined : { value, tokens };
 };
 
 const referencedDescription = (
@@ -35,7 +130,7 @@ const referencedDescription = (
     if (typeof value.$ref !== "string" || active.has(value.$ref))
       return undefined;
     active.add(value.$ref);
-    value = resolveReference(root, value.$ref);
+    value = resolveLocalSchemaReference(root, value.$ref)?.value;
   }
   return undefined;
 };
@@ -97,7 +192,7 @@ const objectBranch = (
   const resolved =
     isObject(branch) && typeof branch.$ref === "string"
       ? Object.keys(branch).length === 1
-        ? resolveReference(root, branch.$ref)
+        ? resolveLocalSchemaReference(root, branch.$ref)?.value
         : undefined
       : branch;
   return isObject(resolved) &&
@@ -161,7 +256,50 @@ const preserveSharedDefault = (
     schema.default = defaults[0];
 };
 
-const normalizeAdvertisedSchema = (value: unknown): SchemaNormalization => {
+const referencesChangingTarget = (
+  node: unknown,
+  root: unknown,
+  active: ReadonlySet<string> = new Set(),
+): boolean => {
+  // A local reference hides the target's widening from the branch that uses
+  // it. Treat such a sensitive branch as changed so its constraint is dropped.
+  if (Array.isArray(node))
+    return node.some((child) => referencesChangingTarget(child, root, active));
+  if (!isObject(node)) return false;
+  if (typeof node.$ref === "string" && !active.has(node.$ref)) {
+    const nestedActive = new Set([...active, node.$ref]);
+    const target = resolveLocalSchemaReference(
+      root as Readonly<Record<string, unknown>>,
+      node.$ref,
+    )?.value;
+    if (target !== undefined) {
+      if (
+        normalizeAdvertisedSchema(target, root, nestedActive).changed
+      )
+        return true;
+      if (referencesChangingTarget(target, root, nestedActive)) return true;
+    }
+    // Reference siblings evaluate alongside the target in 2020-12, so keep
+    // inspecting the remaining entries below.
+  }
+  return Object.entries(node).some(([key, child]) => {
+    if (key === "const" || key === "enum" || key === "$ref") return false;
+    // References inside a nested resource address that resource only.
+    if (isObject(child) && "$id" in child) return false;
+    return referencesChangingTarget(child, root, active);
+  });
+};
+
+// Inside a nested resource, references resolve against that resource's own
+// root rather than the outer schema.
+const nestedResourceRoot = (child: unknown, root: unknown): unknown =>
+  isObject(child) && "$id" in child ? child : root;
+
+const normalizeAdvertisedSchema = (
+  value: unknown,
+  root: unknown = value,
+  active: ReadonlySet<string> = new Set(),
+): SchemaNormalization => {
   if (!isObject(value)) return { schema: value, changed: false };
 
   const node: Record<string, unknown> = { ...value };
@@ -169,17 +307,25 @@ const normalizeAdvertisedSchema = (value: unknown): SchemaNormalization => {
   const normalizeMap = (map: Readonly<Record<string, unknown>>) =>
     Object.fromEntries(
       Object.entries(map).map(([name, child]) => {
-        const result = normalizeAdvertisedSchema(child);
+        const result = normalizeAdvertisedSchema(
+          child,
+          nestedResourceRoot(child, root),
+          active,
+        );
         changed ||= result.changed;
         return [name, result.schema];
       }),
     );
   const normalizeList = (list: readonly unknown[]) =>
-    list.map((child) => {
-      const result = normalizeAdvertisedSchema(child);
-      changed ||= result.changed;
-      return result;
-    });
+      list.map((child) => {
+        const result = normalizeAdvertisedSchema(
+          child,
+          nestedResourceRoot(child, root),
+          active,
+        );
+        changed ||= result.changed;
+        return result;
+      });
 
   for (const [key, child] of Object.entries(value)) {
     if (schemaMaps.has(key) && isObject(child)) {
@@ -200,8 +346,17 @@ const normalizeAdvertisedSchema = (value: unknown): SchemaNormalization => {
     ) {
       const results = Array.isArray(child)
         ? normalizeList(child)
-        : [normalizeAdvertisedSchema(child)];
-      const nestedChanged = results.some((result) => result.changed);
+        : [
+            normalizeAdvertisedSchema(
+              child,
+              nestedResourceRoot(child, root),
+              active,
+            ),
+          ];
+      const nestedChanged =
+        results.some((result) => result.changed) ||
+        (key === "contains" &&
+          referencesChangingTarget(child, root, active));
       if (
         key === "contains" &&
         nestedChanged &&
@@ -234,11 +389,43 @@ const normalizeAdvertisedSchema = (value: unknown): SchemaNormalization => {
     if (node.type === undefined) node.type = "boolean";
     changed = true;
   }
+  if (node.const === "") {
+    delete node.const;
+    if (node.type === undefined) node.type = "string";
+    changed = true;
+  }
+  if (Array.isArray(node.enum) && node.enum.some((item) => item === "")) {
+    // An empty enum member is rejected by Gemini function declarations; widen
+    // to every member type so canonical-valid values stay accepted.
+    const members = node.enum;
+    delete node.enum;
+    if (
+      node.type === undefined &&
+      node.anyOf === undefined &&
+      node.oneOf === undefined
+    ) {
+      const types = [...new Set(members.map(literalSchemaType))];
+      const defined = types.filter((type): type is string => type !== undefined);
+      if (defined.length === types.length) {
+        if (defined.length === 1) node.type = defined[0];
+        else if (defined.length > 1)
+          node.anyOf = defined.map((type) => ({ type }));
+      }
+    }
+    changed = true;
+  }
 
   const negated = Object.hasOwn(value, "not")
-    ? normalizeAdvertisedSchema(value.not)
+    ? normalizeAdvertisedSchema(
+        value.not,
+        nestedResourceRoot(value.not, root),
+        active,
+      )
     : undefined;
-  if (negated?.changed) {
+  if (
+    negated?.changed ||
+    referencesChangingTarget(value.not, root, active)
+  ) {
     // Widening a predicate under `not` narrows the containing schema.
     changed = true;
     delete node.not;
@@ -247,20 +434,39 @@ const normalizeAdvertisedSchema = (value: unknown): SchemaNormalization => {
   }
 
   const conditional = Object.hasOwn(value, "if")
-    ? normalizeAdvertisedSchema(value.if)
+    ? normalizeAdvertisedSchema(
+        value.if,
+        nestedResourceRoot(value.if, root),
+        active,
+      )
     : undefined;
   const thenBranch = Object.hasOwn(value, "then")
-    ? normalizeAdvertisedSchema(value.then)
+    ? normalizeAdvertisedSchema(
+        value.then,
+        nestedResourceRoot(value.then, root),
+        active,
+      )
     : undefined;
   const elseBranch = Object.hasOwn(value, "else")
-    ? normalizeAdvertisedSchema(value.else)
+    ? normalizeAdvertisedSchema(
+        value.else,
+        nestedResourceRoot(value.else, root),
+        active,
+      )
     : undefined;
-  if (conditional?.changed) {
+  if (
+    conditional?.changed ||
+    referencesChangingTarget(value.if, root, active)
+  ) {
     // Changing the predicate can route canonical-valid inputs into a rejecting branch.
     changed = true;
     delete node.if;
     delete node.then;
     delete node.else;
+    // The conditional no longer evaluates its branches, so any unevaluated
+    // guard would now reject inputs the branches used to cover.
+    delete node.unevaluatedProperties;
+    delete node.unevaluatedItems;
   } else {
     if (conditional !== undefined) node.if = conditional.schema;
     if (thenBranch !== undefined) {
@@ -278,7 +484,9 @@ const normalizeAdvertisedSchema = (value: unknown): SchemaNormalization => {
     if (!Array.isArray(branches)) continue;
     const normalized = normalizeList(branches);
     const schemas = normalized.map((result) => result.schema);
-    const branchesChanged = normalized.some((result) => result.changed);
+    const branchesChanged =
+      normalized.some((result) => result.changed) ||
+      branches.some((branch) => referencesChangingTarget(branch, root, active));
     if (combinator === "oneOf" && branchesChanged) {
       const booleanLiteralsOnly = branches.every(isBooleanLiteralSchema);
       if (booleanLiteralsOnly) {
@@ -380,18 +588,218 @@ const flattenRootObjectUnion = (
   };
 };
 
+// Collect references and anchors from schema positions only: literal
+// annotation data (examples, defaults) is not a schema, so any `$ref` inside
+// it must not influence advertised normalization.
+const collectSchemaReferences = (
+  node: unknown,
+  refs: Set<string>,
+  path: readonly string[],
+): void => {
+  if (Array.isArray(node)) {
+    node.forEach((child, index) =>
+      collectSchemaReferences(child, refs, [...path, String(index)]),
+    );
+    return;
+  }
+  if (!isObject(node)) return;
+  if (typeof node.$ref === "string" && node.$ref.startsWith("#"))
+    refs.add(node.$ref);
+  for (const [key, child] of Object.entries(node)) {
+    if (
+      !schemaMaps.has(key) &&
+      !schemaArrays.has(key) &&
+      !schemaChildren.has(key)
+    )
+      continue;
+    // Fragment references inside a nested resource address that resource,
+    // never the outer schema; do not collect them.
+    if (isObject(child) && "$id" in child) continue;
+    if (schemaMaps.has(key) && isObject(child)) {
+      for (const [name, grandChild] of Object.entries(child))
+        collectSchemaReferences(grandChild, refs, [...path, key, name]);
+    } else if (Array.isArray(child)) {
+      child.forEach((grandChild, index) =>
+        collectSchemaReferences(grandChild, refs, [...path, key, String(index)]),
+      );
+    } else {
+      collectSchemaReferences(child, refs, [...path, key]);
+    }
+  }
+};
+
+// A reference whose target position the structural pass removed cannot keep
+// its `$ref` (clients that compile the schema could not load it), so the
+// widened target is inlined at every caller instead.
+const inlineReferences = (
+  node: unknown,
+  dangling: ReadonlyMap<string, unknown>,
+): unknown => {
+  if (Array.isArray(node)) {
+    let changed = false;
+    const mapped = node.map((child) => {
+      const next = inlineReferences(child, dangling);
+      changed ||= next !== child;
+      return next;
+    });
+    return changed ? mapped : node;
+  }
+  if (!isObject(node)) return node;
+  if (
+    typeof node.$ref === "string" &&
+    dangling.has(node.$ref) &&
+    Object.keys(node).length === 1
+  )
+    return dangling.get(node.$ref);
+  let changed = false;
+  const rebuilt: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(node)) {
+    if (schemaMaps.has(key) && isObject(child)) {
+      let mapChanged = false;
+      const map: Record<string, unknown> = {};
+      for (const [name, grandChild] of Object.entries(child)) {
+        const next = inlineReferences(grandChild, dangling);
+        map[name] = next;
+        mapChanged ||= next !== grandChild;
+      }
+      rebuilt[key] = mapChanged ? map : child;
+      changed ||= mapChanged;
+    } else if (schemaArrays.has(key) || schemaChildren.has(key)) {
+      const next = inlineReferences(child, dangling);
+      rebuilt[key] = next;
+      changed ||= next !== child;
+    } else {
+      rebuilt[key] = child;
+    }
+  }
+  return changed ? rebuilt : node;
+};
+
+// Positive local references can address positions the structural walk never
+// visits (for example a root-level annotation), which would leave the target's
+// empty-string literal advertised. Normalize every referenced target too.
+// All change decisions are computed against the immutable source schema before
+// any writeback, so rewriting one target cannot mask another target's change.
+const normalizeReferencedTargets = (
+  advertised: Record<string, unknown>,
+  source: Readonly<Record<string, unknown>>,
+): Record<string, unknown> => {
+  const refs = new Set<string>();
+  collectSchemaReferences(source, refs, []);
+  const writes: Array<[readonly string[], unknown]> = [];
+  const dangling = new Map<string, unknown>();
+  const processed = new Set<string>();
+  const queue = [...refs];
+  while (queue.length > 0) {
+    const reference = queue.shift();
+    if (reference === undefined || processed.has(reference)) continue;
+    processed.add(reference);
+    const resolved = resolveLocalSchemaReference(source, reference);
+    if (resolved === undefined || !isObject(resolved.value)) continue;
+    // Targets reached only through other unwalked targets need the same
+    // treatment as directly referenced ones.
+    const nested = new Set<string>();
+    collectSchemaReferences(resolved.value, nested, resolved.tokens);
+    for (const nestedRef of nested)
+      if (!processed.has(nestedRef)) queue.push(nestedRef);
+    const presented = resolvePointer(advertised, resolved.tokens);
+    if (presented === undefined) {
+      // The position was removed by the structural pass; inline the widened
+      // target at its callers rather than dangling.
+      const removed = normalizeAdvertisedSchema(
+        resolved.value,
+        source,
+        new Set([reference]),
+      );
+      dangling.set(reference, removed.schema);
+      continue;
+    }
+    const result = normalizeAdvertisedSchema(
+      resolved.value,
+      source,
+      new Set([reference]),
+    );
+    if (!result.changed) continue;
+    // Prefer the presented node at the same position so injected property
+    // descriptions survive the writeback.
+    const replacement = isObject(presented)
+      ? normalizeAdvertisedSchema(
+          presented,
+          source,
+          new Set([reference]),
+        ).schema
+      : result.schema;
+    writes.push([resolved.tokens, replacement]);
+  }
+  // Apply shallow writes first so a parent replacement cannot restore an
+  // un-widened descendant; deeper writes then override their own positions.
+  writes.sort((a, b) => a[0].length - b[0].length);
+  for (const [tokens, replacement] of writes)
+    assignAtPath(advertised, tokens, replacement);
+  return dangling.size > 0 ? (inlineReferences(advertised, dangling) as Record<string, unknown>) : advertised;
+};
+
+const assignAtPath = (
+  container: Record<string, unknown> | unknown[],
+  tokens: readonly string[],
+  replacement: unknown,
+): void => {
+  if (tokens.length === 0) return;
+  const [head, ...rest] = tokens;
+  if (Array.isArray(container)) {
+    if (head === undefined || !/^(?:0|[1-9]\d*)$/u.test(head)) return;
+    const index = Number(head);
+    if (index >= container.length) return;
+    if (rest.length === 0) {
+      container[index] = replacement;
+      return;
+    }
+    const child = container[index];
+    const copy = Array.isArray(child)
+      ? [...child]
+      : isObject(child)
+        ? { ...child }
+        : undefined;
+    if (copy === undefined) return;
+    container[index] = copy;
+    assignAtPath(copy, rest, replacement);
+    return;
+  }
+  if (head === undefined) return;
+  if (rest.length === 0) {
+    container[head] = replacement;
+    return;
+  }
+  const child = container[head];
+  const copy = Array.isArray(child)
+    ? [...child]
+    : isObject(child)
+      ? { ...child }
+      : undefined;
+  if (copy === undefined) return;
+  container[head] = copy;
+  assignAtPath(copy, rest, replacement);
+};
+
+const advertisedSchema = (
+  input: unknown,
+  source: Readonly<Record<string, unknown>>,
+): Record<string, unknown> => {
+  const schema = normalizeAdvertisedSchema(input).schema as Record<
+    string,
+    unknown
+  >;
+  return normalizeReferencedTargets(schema, source);
+};
+
 /** Describe canonical input fields and present the root as one object. */
-export const presentInputJsonSchema = (
-  root: Record<string, unknown>,
+export const presentInputJsonSchema = (  root: Record<string, unknown>,
   describeProperty: (property: string) => string | undefined,
 ): Record<string, unknown> => {
   const flattened = flattenRootObjectUnion(root);
   const described = describeSchema(flattened, flattened, describeProperty);
   if (!isObject(described))
-    return normalizeAdvertisedSchema(flattened).schema as Record<
-      string,
-      unknown
-    >;
+    return advertisedSchema(flattened, root);
   const {
     dependencies: _dependencies,
     dependentRequired: _dependentRequired,
@@ -414,18 +822,18 @@ export const presentInputJsonSchema = (
             : [],
         );
   if (dependencyGuidance.length === 0)
-    return normalizeAdvertisedSchema(presentation).schema as Record<
-      string,
-      unknown
-    >;
+    return advertisedSchema(presentation, root);
   const description = [
     typeof presentation.description === "string"
       ? presentation.description
       : undefined,
     ...dependencyGuidance,
   ].filter((text) => text !== undefined);
-  return normalizeAdvertisedSchema({
-    ...presentation,
-    description: description.join(" "),
-  }).schema as Record<string, unknown>;
+  return advertisedSchema(
+    {
+      ...presentation,
+      description: description.join(" "),
+    },
+    root,
+  );
 };
