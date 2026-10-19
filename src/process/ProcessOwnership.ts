@@ -12,7 +12,10 @@ import { launcherIdentityFailure } from "./ProcessOwnershipIdentity.js";
 import { descendantsOf, liveProcesses } from "./ProcessOwnershipProcessTree.js";
 import { readProcessRunTokens } from "./ProcessRunTokenObservations.js";
 import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
-import { ProcessOwnershipEvidenceOwner } from "./ProcessOwnershipEvidence.js";
+import {
+  processIdentityHasExited,
+  ProcessOwnershipEvidenceOwner,
+} from "./ProcessOwnershipEvidence.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -967,14 +970,6 @@ const sanitizedTokenReadFailure = (diagnostic: string | undefined): string => {
   return "other_unavailable";
 };
 
-const processIdentityHasExited = (
-  identity: ProcessIdentityObservation,
-): boolean =>
-  identity.state === "absent" ||
-  (identity.state === "readable" &&
-    identity.lifecycle?.state === "observed" &&
-    identity.lifecycle.lifecycle === "zombie");
-
 const processOwnershipFailures = async (
   members: readonly ProcessTableEntry[],
   runId: string,
@@ -1148,10 +1143,11 @@ const currentProcessUid = (): number | undefined =>
 const environmentWithheldFromInspection = (
   diagnostic: string,
   observedUid: number | undefined,
+  platform: NodeJS.Platform | undefined,
 ): boolean => {
   const uid = currentProcessUid();
   if (uid !== undefined && observedUid !== undefined && observedUid !== uid)
-    return true;
+    return platform !== "linux" || /^(?:EACCES|EPERM)(?::|$)/u.test(diagnostic);
   return (
     diagnostic === PLATFORM_BINARY_ENVIRONMENT_WITHHELD ||
     diagnostic === RESTRICTED_PROCESS_ENVIRONMENT_WITHHELD
@@ -1222,6 +1218,7 @@ const scanTokenOwnedProcesses = async (
       environmentWithheldFromInspection(
         candidate.diagnostic,
         candidate.process.uid,
+        host.platform,
       )
     ) {
       withheld.push(candidate);
@@ -1293,26 +1290,15 @@ const scanWithOwnershipEvidence = async (
     observationRows,
     host,
   );
-  const baselineIdentityFailures = new Map<
-    number,
-    ProcessOwnershipValidationFailure
-  >();
   const candidates = observationRows.filter((process) => {
     if (retainedPids.has(process.pid)) return true;
     if (!baseline.has(process.pid)) return true;
     const before = baseline.get(process.pid);
     const now = firstIdentities.get(process.pid);
-    if (before === null || now?.state !== "readable") {
-      baselineIdentityFailures.set(process.pid, {
-        pid: process.pid,
-        reason: "process-identity-unavailable",
-        diagnostic: "process identity was unavailable during token validation",
-      });
-      // Keep the row in the owning fact pass. The failure is not evidence that
-      // the process is absent, and a related unknown generation must survive
-      // a later process-table omission.
-      return true;
-    }
+    // The baseline only excludes unchanged generations. Resolve uncertainty
+    // through the current before/token/after facts, which can establish absence
+    // or retain an unresolved candidate in the owning evidence ledger.
+    if (before === null || now?.state !== "readable") return true;
     return now.identity !== before;
   });
 
@@ -1330,9 +1316,9 @@ const scanWithOwnershipEvidence = async (
   for (let attempt = 0; attempt < TOKEN_READ_RETRY_ATTEMPTS; attempt += 1) {
     const retryRows = facts
       .filter(
-        ({ token, identityAfter }) =>
-          token.state === "unavailable" &&
-          !processIdentityHasExited(identityAfter),
+        (fact) =>
+          fact.token.state === "unavailable" &&
+          !processIdentityHasExited(fact.identityAfter),
       )
       .map(({ process }) => process);
     if (retryRows.length === 0) break;
@@ -1366,13 +1352,7 @@ const scanWithOwnershipEvidence = async (
   const identities = new Map<number, string | null>();
 
   for (const fact of facts) {
-    // The table row and baseline predate the final native observation. An
-    // exited candidate needs no ownership proof or signal, even when its
-    // token became unreadable while exiting. Unknown native state stays a
-    // cleanup failure; table omission alone is never proof of exit.
     if (processIdentityHasExited(fact.identityAfter)) continue;
-    const baselineFailure = baselineIdentityFailures.get(fact.process.pid);
-    if (baselineFailure !== undefined) failures.push(baselineFailure);
     if (fact.state === "replaced")
       failures.push({
         pid: fact.process.pid,
@@ -1421,7 +1401,11 @@ const scanWithOwnershipEvidence = async (
         : undefined;
     if (
       knownUnrelated &&
-      environmentWithheldFromInspection(fact.token.reason, observedUid)
+      environmentWithheldFromInspection(
+        fact.token.reason,
+        observedUid,
+        host.platform,
+      )
     ) {
       unverified.push({
         pid: fact.process.pid,

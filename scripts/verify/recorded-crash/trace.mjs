@@ -83,6 +83,13 @@ export async function verifyCoreInspectionTrace({
       traces,
       sentinelPid: sentinel.pid,
       psExecutables: psPaths,
+      supervisorCommands: [
+        { executable: process.execPath, script: entrypoint },
+        {
+          executable: process.execPath,
+          script: fileURLToPath(new URL("./trace-client.mjs", import.meta.url)),
+        },
+      ],
     });
     for (const { file, text } of traces) {
       // Keep the source executable present: GDB 16 otherwise silently hides a

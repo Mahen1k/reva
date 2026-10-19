@@ -340,7 +340,10 @@ it("retire sessions when APK bytes, engine bytes or JVM options change", async (
 
 it("retires an idle engine and starts a fresh one for a later request", async () => {
   const { service, apk, launches, provider } = await setup();
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  vi.useFakeTimers({
+    toFake: ["setTimeout", "clearTimeout"],
+    shouldAdvanceTime: true,
+  });
   try {
     const first = await service.execute("inspect_android_package", {
       path: apk,
@@ -1069,7 +1072,10 @@ it.each(["idle", "target-change"])(
     );
     try {
       if (retirement === "idle")
-        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        vi.useFakeTimers({
+          toFake: ["setTimeout", "clearTimeout"],
+          shouldAdvanceTime: true,
+        });
       const first = await service.execute("inspect_android_package", {
         path: apk,
       });

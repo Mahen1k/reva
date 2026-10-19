@@ -2,17 +2,27 @@ import { expect, it } from "vitest";
 
 import { assertHistoricalPidReadsAreOwnershipOnly } from "../../../scripts/verify/recorded-crash/trace-ownership.mjs";
 
+const supervisorCommands = [
+  { executable: "/runtime/node", script: "/rea/rea.mjs" },
+  { executable: "/runtime/node", script: "/rea/trace-client.mjs" },
+];
+const nodeExec =
+  'execve("/runtime/node", ["/runtime/node", "/rea/rea.mjs"], 0x1) = 0';
+const selfStat = 'openat(AT_FDCWD, "/proc/1200/stat", O_RDONLY|O_CLOEXEC) = 20';
 const psExec =
   'execve("/usr/bin/ps", ["ps", "-axo", "pid=,ppid=,pgid=,uid=,stat=,command="], 0x7fff) = 0';
 
 it("correlates the ps child trace with its parent identity read", () => {
   const ownershipReads = assertHistoricalPidReadsAreOwnershipOnly({
     sentinelPid: 4008,
+    supervisorCommands,
     psExecutables: new Set(["/usr/bin/ps"]),
     traces: [
       {
         pid: 1200,
         text: [
+          nodeExec,
+          selfStat,
           "vfork() = 1201",
           "clone3({flags=CLONE_VM|CLONE_SIGHAND|CLONE_THREAD}, 88) = 1202",
           'openat(AT_FDCWD, "/proc/4008/stat", O_RDONLY|O_CLOEXEC) = 21',
@@ -42,11 +52,14 @@ it("correlates the ps child trace with its parent identity read", () => {
 it("joins unfinished and resumed CLONE_THREAD records", () => {
   const ownershipReads = assertHistoricalPidReadsAreOwnershipOnly({
     sentinelPid: 4008,
+    supervisorCommands,
     psExecutables: new Set(["/usr/bin/ps"]),
     traces: [
       {
         pid: 1200,
         text: [
+          nodeExec,
+          selfStat,
           "vfork() = 1201",
           "clone3({flags=CLONE_VM|CLONE_SIGHAND|CLONE_THREAD, child_tid=0x3 <unfinished ...>",
           "<... clone3 resumed>) = 1202",
@@ -68,6 +81,8 @@ it("rejects provider-style reads outside the ps child and stat-only caller", () 
     {
       pid: 1200,
       text: [
+        nodeExec,
+        selfStat,
         "vfork() = 1201",
         'openat(AT_FDCWD, "/proc/4008/cmdline", O_RDONLY) = 21',
       ].join("\n"),
@@ -79,6 +94,7 @@ it("rejects provider-style reads outside the ps child and stat-only caller", () 
     assertHistoricalPidReadsAreOwnershipOnly({
       traces,
       sentinelPid: 4008,
+      supervisorCommands,
       psExecutables: new Set(["/usr/bin/ps"]),
     }),
   ).toThrow("Historical PID caused a provider lookup");
@@ -92,11 +108,12 @@ it("does not trust a ps command with different arguments or failed exec", () => 
     expect(() =>
       assertHistoricalPidReadsAreOwnershipOnly({
         sentinelPid: 4008,
+        supervisorCommands,
         psExecutables: new Set(["/usr/bin/ps"]),
         traces: [
           {
             pid: 1200,
-            text: `vfork() = 1201\nopenat(AT_FDCWD, "/proc/4008/stat", O_RDONLY) = 3`,
+            text: `${nodeExec}\n${selfStat}\nvfork() = 1201\nopenat(AT_FDCWD, "/proc/4008/stat", O_RDONLY) = 3`,
           },
           { pid: 1201, text },
         ],
@@ -108,9 +125,10 @@ it("allows only known procfs fields inside the exact ps child", () => {
   expect(() =>
     assertHistoricalPidReadsAreOwnershipOnly({
       sentinelPid: 4008,
+      supervisorCommands,
       psExecutables: new Set(["/usr/bin/ps"]),
       traces: [
-        { pid: 1200, text: "vfork() = 1201" },
+        { pid: 1200, text: `${nodeExec}\n${selfStat}\nvfork() = 1201` },
         {
           pid: 1201,
           text: `${psExec}\nopenat(AT_FDCWD, "/proc/4008/exe", O_RDONLY) = 3`,
@@ -125,13 +143,17 @@ it("does not grant the ownership process thread permit to a forked child", () =>
     expect(() =>
       assertHistoricalPidReadsAreOwnershipOnly({
         sentinelPid: 4008,
+        supervisorCommands,
         psExecutables: new Set(["/usr/bin/ps"]),
         traces: [
           {
             pid: 1200,
-            text: ["vfork() = 1201", "clone3({flags=SIGCHLD}, 88) = 1203"].join(
-              "\n",
-            ),
+            text: [
+              nodeExec,
+              selfStat,
+              "vfork() = 1201",
+              "clone3({flags=SIGCHLD}, 88) = 1203",
+            ].join("\n"),
           },
           { pid: 1201, text: psExec },
           {
@@ -142,3 +164,104 @@ it("does not grant the ownership process thread permit to a forked child", () =>
       }),
     ).toThrow("Historical PID caused a provider lookup");
 });
+
+type Trace = { pid: number; text: string };
+const fixture = (): Trace[] => [
+  {
+    pid: 1200,
+    text: `${nodeExec}\n${selfStat}\nvfork() = 1201\nclone3({flags=CLONE_VM|CLONE_THREAD}, 88) = 1202`,
+  },
+  { pid: 1201, text: psExec },
+  {
+    pid: 1202,
+    text: 'openat(AT_FDCWD, "/proc/4008/stat", O_RDONLY|O_CLOEXEC) = 21',
+  },
+];
+const inspect = (traces: Trace[]) =>
+  assertHistoricalPidReadsAreOwnershipOnly({
+    traces,
+    sentinelPid: 4008,
+    supervisorCommands,
+    psExecutables: new Set(["/usr/bin/ps"]),
+  });
+
+it.each(["O_WRONLY", "O_RDWR|O_CLOEXEC"])(
+  "rejects writable supervisor identity opens with %s",
+  (flags) => {
+    const traces = fixture();
+    traces[2]!.text = traces[2]!.text.replace("O_RDONLY|O_CLOEXEC", flags);
+    expect(() => inspect(traces)).toThrow(
+      "Historical PID caused a provider lookup",
+    );
+  },
+);
+
+it("rejects writable fields even inside the exact ps child", () => {
+  const traces = fixture();
+  traces[1]!.text += '\nopenat(AT_FDCWD, "/proc/4008/status", O_RDWR) = 3';
+  expect(() => inspect(traces)).toThrow(
+    "Historical PID caused a provider lookup",
+  );
+});
+
+it.each(["/usr/bin/gdb", "/venv/python"])(
+  "rejects a supervisor thread replaced by %s",
+  (executable) => {
+    const traces = fixture();
+    traces[2]!.text = `execve("${executable}", ["provider"], 0x1) = 0\n${traces[2]!.text}`;
+    expect(() => inspect(traces)).toThrow(
+      "Historical PID caused a provider lookup",
+    );
+  },
+);
+
+it("rejects a supervisor replaced by a provider", () => {
+  const traces = fixture();
+  traces[0]!.text += '\nexecve("/usr/bin/gdb", ["gdb"], 0x1) = 0';
+  expect(() => inspect(traces)).toThrow(
+    "Historical PID caused a provider lookup",
+  );
+});
+
+it("does not retain a ps allowance after another executable starts", () => {
+  const traces = fixture();
+  traces[1]!.text += '\nexecve("/usr/bin/gdb", ["gdb"], 0x1) = 0';
+  expect(() => inspect(traces)).toThrow(
+    "Historical PID caused a provider lookup",
+  );
+});
+
+it("rejects native identity reads from an unknown thread", () => {
+  const traces = fixture();
+  traces.push({ pid: 9000, text: traces[2]!.text });
+  expect(() => inspect(traces)).toThrow(
+    "Historical PID caused a provider lookup",
+  );
+});
+
+it("rejects an unrelated Node script with ownership-looking observations", () => {
+  const traces = fixture();
+  traces[0]!.text = traces[0]!.text.replace("/rea/rea.mjs", "/unrelated.mjs");
+  expect(() => inspect(traces)).toThrow(
+    "Historical PID caused a provider lookup",
+  );
+});
+
+it("requires a native self-identity cohort rather than an isolated PID lookup", () => {
+  const traces = fixture();
+  traces[0]!.text = traces[0]!.text.replace(selfStat, "");
+  expect(() => inspect(traces)).toThrow(
+    "Historical PID caused a provider lookup",
+  );
+});
+
+it.each(["maps", "mem", "environ", "exe"])(
+  "rejects supervisor access to sentinel %s",
+  (field) => {
+    const traces = fixture();
+    traces[2]!.text += `\nopenat(AT_FDCWD, "/proc/4008/${field}", O_RDONLY|O_CLOEXEC) = 22`;
+    expect(() => inspect(traces)).toThrow(
+      "Historical PID caused a provider lookup",
+    );
+  },
+);
