@@ -2,7 +2,11 @@ import { compareUnicodeCodePoints } from "../../domain/unicodeCodePointOrder.js"
 import type { ElectronIpcFinding } from "../../domain/javascript/electronStaticAnalysisTypes.js";
 import type { ElectronBoundarySummary } from "../../domain/javascript/javascriptApplicationAnalysis.js";
 import type { JavaScriptModuleArtifactAnalysis } from "./JavaScriptArtifactAnalysisTypes.js";
-import type { JavaScriptArtifactFile } from "../../domain/javascript/javascriptArtifactFiles.js";
+import type {
+  JavaScriptArtifactFile,
+  JavaScriptArtifactPathFacts,
+  JavaScriptUnanalyzedArtifactLookup,
+} from "../../domain/javascript/javascriptArtifactFiles.js";
 import {
   resolveArtifactPathByContext,
   type ResolveArtifactPathInput,
@@ -83,7 +87,8 @@ export const unambiguousElectronIpcPairings = (
 /** Summarize static Electron findings without treating gaps as absence. */
 export const summarizeElectronBoundaries = (
   analysis: JavaScriptModuleArtifactAnalysis,
-  directoryPaths?: ReadonlySet<string>,
+  retainedPaths?: ReadonlyMap<string, JavaScriptArtifactPathFacts>,
+  unanalyzedFiles?: JavaScriptUnanalyzedArtifactLookup,
 ): ElectronBoundarySummary => {
   const files = new Map(analysis.files.map(({ file }) => [file.path, file]));
   const javascript = analysis.files.flatMap(({ javascript: value }) =>
@@ -164,7 +169,8 @@ export const summarizeElectronBoundaries = (
           specifier: finding.module_path,
           context: finding.module_resolution_context,
           files,
-          directoryPaths,
+          retainedPaths,
+          unanalyzedFiles,
           runtimePathKind: "node-entrypoint",
         }),
     ).length,
@@ -175,7 +181,8 @@ export const summarizeElectronBoundaries = (
         specifier: finding.specifier,
         context: "module-specifier",
         files,
-        directoryPaths,
+        retainedPaths,
+        unanalyzedFiles,
         kind: "native-addon",
         moduleKind: finding.module_kind,
       }),
@@ -209,7 +216,10 @@ interface ResolveToFileInput {
   readonly specifier: string;
   readonly context: "module-specifier" | "filesystem-expression";
   readonly files: ReadonlyMap<string, JavaScriptArtifactFile>;
-  readonly directoryPaths?: ReadonlySet<string> | undefined;
+  readonly retainedPaths?:
+    | ReadonlyMap<string, JavaScriptArtifactPathFacts>
+    | undefined;
+  readonly unanalyzedFiles?: JavaScriptUnanalyzedArtifactLookup | undefined;
   readonly kind?: JavaScriptArtifactFile["kind"];
   readonly moduleKind?: "import" | "require";
   readonly runtimePathKind?: ResolveArtifactPathInput["runtimePathKind"];
@@ -221,9 +231,10 @@ const resolvesToFile = (input: ResolveToFileInput): boolean => {
     sourcePath: input.file.path,
     context: input.context,
     files: input.files,
-    ...(input.directoryPaths === undefined
+    unanalyzedFiles: input.unanalyzedFiles,
+    ...(input.retainedPaths === undefined
       ? {}
-      : { directoryPaths: input.directoryPaths }),
+      : { retainedPaths: input.retainedPaths }),
     ...(input.runtimePathKind === undefined
       ? {}
       : { runtimePathKind: input.runtimePathKind }),

@@ -155,7 +155,7 @@ const addWindowPreload = (
     sourcePath: input.file.path,
     context: resolutionContext,
     files: input.context.filesByPath,
-    directoryPaths: input.context.directoryPaths,
+    retainedPaths: input.context.retainedPaths,
     unanalyzedFiles: input.context.unanalyzedFiles,
     runtimePathKind: "exact-file",
   });
@@ -257,7 +257,7 @@ const addUtilityProcess = (
           sourcePath: file.path,
           context: value.module_resolution_context,
           files: context.filesByPath,
-          directoryPaths: context.directoryPaths,
+          retainedPaths: context.retainedPaths,
           unanalyzedFiles: context.unanalyzedFiles,
           runtimePathKind: "node-entrypoint",
         });

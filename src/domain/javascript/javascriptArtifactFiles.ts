@@ -69,6 +69,12 @@ export interface JavaScriptArtifactContainer {
   readonly inventory_artifact_id: string;
 }
 
+export interface JavaScriptArtifactPathFacts {
+  readonly kind: "directory" | "symlink";
+  readonly container_sha256: string;
+  readonly limitations: readonly string[];
+}
+
 /** Deterministic relevant-file projection plus explicit omissions. */
 export interface JavaScriptArtifactFileSet {
   readonly files: readonly JavaScriptArtifactFile[];

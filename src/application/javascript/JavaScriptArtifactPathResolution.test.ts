@@ -516,31 +516,83 @@ describe("legacy package main lookup", () => {
     },
   );
 
-  it("retains inventoried directories during legacy ESM main finalization", () => {
-    const files = fileMap([
-      file("app/src/entry.mjs", "root"),
-      file(
-        "app/node_modules/fixture/package.json",
-        "root",
-        '{"main":"./lib/"}',
-      ),
-      file("app/node_modules/fixture/lib.js", "root"),
-    ]);
-    expect(
-      resolve({
-        declaredPath: "fixture",
-        sourcePath: "app/src/entry.mjs",
-        context: "module-specifier",
-        moduleKind: "import",
-        files,
-        directoryPaths: new Set(["app/node_modules/fixture/lib/.js"]),
-      }),
-    ).toMatchObject({
-      resolution_status: "rejected",
-      resolved_path: null,
-      candidate_path: "app/node_modules/fixture/lib/.js",
-    });
-  });
+  it.each(["root", "other"])(
+    "checks %s directory ownership during legacy ESM main finalization",
+    (container) => {
+      const files = fileMap([
+        file("app/src/entry.mjs", "root"),
+        file(
+          "app/node_modules/fixture/package.json",
+          "root",
+          '{"main":"./lib/"}',
+        ),
+        file("app/node_modules/fixture/lib.js", "root"),
+      ]);
+      expect(
+        resolve({
+          declaredPath: "fixture",
+          sourcePath: "app/src/entry.mjs",
+          context: "module-specifier",
+          moduleKind: "import",
+          files,
+          retainedPaths: new Map([
+            [
+              "app/node_modules/fixture/lib/.js",
+              {
+                kind: "directory",
+                container_sha256: container.padEnd(64, "0"),
+                limitations: [],
+              },
+            ],
+          ]),
+        }),
+      ).toMatchObject({
+        resolution_status: container === "root" ? "rejected" : "not-found",
+        resolved_path: null,
+        ...(container === "root"
+          ? { candidate_path: "app/node_modules/fixture/lib/.js" }
+          : {}),
+      });
+    },
+  );
+
+  it.each(["root", "other"])(
+    "checks %s symlink ownership before finalizing a legacy main",
+    (container) => {
+      const files = fileMap([
+        file("app/entry.mjs", "root"),
+        file(
+          "app/node_modules/fixture/package.json",
+          "root",
+          '{"main":"./lib/"}',
+        ),
+        file("app/node_modules/fixture/lib.js", "root"),
+        file("app/node_modules/fixture/index.js", "root"),
+      ]);
+      expect(
+        resolve({
+          declaredPath: "fixture",
+          sourcePath: "app/entry.mjs",
+          context: "module-specifier",
+          moduleKind: "import",
+          files,
+          retainedPaths: new Map([
+            [
+              "app/node_modules/fixture/lib/.js",
+              {
+                kind: "symlink",
+                container_sha256: container.padEnd(64, "0"),
+                limitations: [],
+              },
+            ],
+          ]),
+        }),
+      ).toMatchObject({
+        resolution_status: container === "root" ? "unavailable" : "not-found",
+        resolved_path: null,
+      });
+    },
+  );
 
   it.each(["import", "require"] as const)(
     "does not recursively resolve a nested package from a %s package main",

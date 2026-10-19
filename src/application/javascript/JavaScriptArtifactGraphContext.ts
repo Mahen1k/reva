@@ -20,6 +20,7 @@ import type {
   JavaScriptArtifactFile,
   JavaScriptArtifactFileSet,
   JavaScriptArtifactFileKind,
+  JavaScriptArtifactPathFacts,
 } from "../../domain/javascript/javascriptArtifactFiles.js";
 import { JavaScriptArtifactGraphAccumulator } from "./JavaScriptArtifactGraphAccumulator.js";
 import {
@@ -40,7 +41,7 @@ export interface JavaScriptArtifactGraphContext {
   readonly snapshot: ArtifactInventorySnapshot;
   readonly fileSet: JavaScriptArtifactFileSet;
   readonly analysis: JavaScriptModuleArtifactAnalysis;
-  readonly directoryPaths: ReadonlySet<string>;
+  readonly retainedPaths: ReadonlyMap<string, JavaScriptArtifactPathFacts>;
   readonly root: ApplicationNode;
   readonly filesByPath: ReadonlyMap<string, JavaScriptArtifactFile>;
   /** Borrowed inventory lookup for present files outside the source projection. */
@@ -399,14 +400,16 @@ export const resolveArtifactPath = (
   sourcePath: string,
   files: ReadonlyMap<string, JavaScriptArtifactFile>,
   moduleKind?: "import" | "require" | "compiler-dependent",
-  directoryPaths?: ReadonlySet<string>,
+  retainedPaths?: ReadonlyMap<string, JavaScriptArtifactPathFacts>,
+  unanalyzedFiles?: JavaScriptUnanalyzedArtifactLookup,
 ): string | null =>
   resolveArtifactPathByContext({
     declaredPath: specifier,
     sourcePath,
     context: "module-specifier",
     files,
-    ...(directoryPaths === undefined ? {} : { directoryPaths }),
+    unanalyzedFiles,
+    ...(retainedPaths === undefined ? {} : { retainedPaths }),
     ...(moduleKind === undefined ? {} : { moduleKind }),
   }).resolved_path;
 

@@ -289,7 +289,7 @@ const resolveModuleTarget = (
     sourcePath: input.file.path,
     context: "module-specifier",
     files: input.context.filesByPath,
-    directoryPaths: input.context.directoryPaths,
+    retainedPaths: input.context.retainedPaths,
     unanalyzedFiles: input.context.unanalyzedFiles,
     moduleKind: moduleResolutionModeForJavaScriptReference(
       input.file.path,

@@ -646,7 +646,7 @@ const addPackageRole = (
     sourcePath: input.packageFile.path,
     context: "package-entrypoint",
     files: context.filesByPath,
-    directoryPaths: context.directoryPaths,
+    retainedPaths: context.retainedPaths,
     unanalyzedFiles: context.unanalyzedFiles,
   });
   const role = createElectronRoleNode(context, {
