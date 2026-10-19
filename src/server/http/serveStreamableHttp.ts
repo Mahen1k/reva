@@ -105,11 +105,17 @@ export const hostHeaderAllowlist = (
   return [...new Set([...localhostAllowedHostnames(), ...known])];
 };
 
-const jsonError = (status: number, code: number, message: string): Response =>
+/** A JSON-RPC error answered outside any session, so its id is null. */
+export const jsonRpcErrorResponse = (
+  status: number,
+  code: number,
+  message: string,
+): Response =>
   Response.json(
     { jsonrpc: "2.0", error: { code, message }, id: null },
     { status },
   );
+const jsonError = jsonRpcErrorResponse;
 
 const protocolOf = (instance: McpServer | Server): Server =>
   "server" in instance ? instance.server : instance;
