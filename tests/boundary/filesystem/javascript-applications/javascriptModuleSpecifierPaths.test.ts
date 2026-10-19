@@ -342,7 +342,6 @@ describe("package exports URL path rejections", () => {
         "./actual%00file.cjs",
         "./actual%2Ffile.cjs",
         "./actual%5Cfile.cjs",
-        "./actual%2Efile.cjs",
         "./../../../../escape.cjs",
       ].map((declaredPath) => ({ moduleKind, declaredPath })),
     ),
@@ -373,6 +372,74 @@ describe("package exports URL path rejections", () => {
           files,
         }),
       ).toMatchObject({ resolved_path: null, resolution_status: "rejected" });
+    },
+  );
+
+  // Node decodes an encoded dot inside an exports target and loads the decoded
+  // file; a literal decoy named with the escape is never borrowed. Verified on
+  // Node 22, 24, and 26: only the decoy on disk leaves the request
+  // ERR_MODULE_NOT_FOUND / MODULE_NOT_FOUND, not an invalid target.
+  it.each(["import", "require"] as const)(
+    "leaves %s exports target ./actual%2Efile.cjs missing instead of borrowing a literal decoy",
+    (moduleKind) => {
+      const packagePath = "app/node_modules/fixture/package.json";
+      const files = filesFor([
+        packagePath,
+        "app/node_modules/fixture/actual%2Efile.cjs",
+      ]);
+      const metadata = files.get(packagePath);
+      if (metadata === undefined) throw new Error("Missing fixture metadata");
+      files.set(packagePath, {
+        ...metadata,
+        kind: "package-json",
+        text: {
+          included: true,
+          value: JSON.stringify({ exports: "./actual%2Efile.cjs" }),
+        },
+      });
+      expect(
+        resolveArtifactPathByContext({
+          declaredPath: "fixture",
+          sourcePath: "app/main.js",
+          context: "module-specifier",
+          moduleKind,
+          files,
+        }),
+      ).toMatchObject({ resolved_path: null, resolution_status: "not-found" });
+    },
+  );
+
+  it.each(["import", "require"] as const)(
+    "resolves %s exports target ./actual%2Efile.cjs to its decoded file",
+    (moduleKind) => {
+      const packagePath = "app/node_modules/fixture/package.json";
+      const files = filesFor([
+        packagePath,
+        "app/node_modules/fixture/actual%2Efile.cjs",
+        "app/node_modules/fixture/actual.file.cjs",
+      ]);
+      const metadata = files.get(packagePath);
+      if (metadata === undefined) throw new Error("Missing fixture metadata");
+      files.set(packagePath, {
+        ...metadata,
+        kind: "package-json",
+        text: {
+          included: true,
+          value: JSON.stringify({ exports: "./actual%2Efile.cjs" }),
+        },
+      });
+      expect(
+        resolveArtifactPathByContext({
+          declaredPath: "fixture",
+          sourcePath: "app/main.js",
+          context: "module-specifier",
+          moduleKind,
+          files,
+        }),
+      ).toMatchObject({
+        resolved_path: "app/node_modules/fixture/actual.file.cjs",
+        resolution_status: "resolved",
+      });
     },
   );
 

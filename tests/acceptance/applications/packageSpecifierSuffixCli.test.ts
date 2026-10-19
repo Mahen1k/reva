@@ -157,8 +157,8 @@ const requests = [
   })),
   ...encodedDotSpecifiers.map((specifier) => ({
     specifier,
-    target: null,
-    status: "rejected" as const,
+    target: "node_modules/legacy/feature.js",
+    status: "resolved" as const,
     value: "legacy feature",
     error: null,
   })),
@@ -350,13 +350,6 @@ cliTest.for(["CLI", "stdio MCP"] as const)(
             resolution_status: status,
           }),
           evidence: expect.objectContaining({
-            ...(encodedDotSpecifiers.includes(specifier)
-              ? {
-                  limitations: expect.arrayContaining([
-                    "Encoded dot or separator bytes are rejected before artifact path resolution.",
-                  ]),
-                }
-              : {}),
             ...(directoryFormSpecifiers.includes(specifier)
               ? {
                   limitations: expect.arrayContaining([

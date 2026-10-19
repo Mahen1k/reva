@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { promisify } from "node:util";
 
 import { describe, expect, it } from "vitest";
 
@@ -674,3 +676,162 @@ const moduleFixture = async (): Promise<string> => {
   });
   return root;
 };
+
+const packageUrlFinalizationCases = [
+  ["#dir/folder", null, null, "ERR_UNSUPPORTED_DIR_IMPORT", "MODULE_NOT_FOUND"],
+  [
+    "fixture/dir/folder",
+    null,
+    null,
+    "ERR_UNSUPPORTED_DIR_IMPORT",
+    "MODULE_NOT_FOUND",
+  ],
+  ["#fixed/x", "safe.js", "safe.js", null, null],
+  [
+    "fixture/fixed/x/",
+    "node_modules/fixture/safe.js",
+    "node_modules/fixture/safe.js",
+    null,
+    null,
+  ],
+  [
+    "legacy/%2e/feature.js",
+    "node_modules/legacy/feature.js",
+    null,
+    null,
+    "MODULE_NOT_FOUND",
+  ],
+  [
+    "legacy/child/%2e%2e/feature.js",
+    "node_modules/legacy/feature.js",
+    null,
+    null,
+    "MODULE_NOT_FOUND",
+  ],
+  [
+    "legacy/child/%2\te%2\te/feature.js",
+    "node_modules/legacy/feature.js",
+    null,
+    null,
+    "MODULE_NOT_FOUND",
+  ],
+  [
+    "legacy/%2e%2e/outside.js",
+    "node_modules/outside.js",
+    null,
+    null,
+    "MODULE_NOT_FOUND",
+  ],
+  [
+    "legacy/hidden%2f/../feature.js",
+    "node_modules/legacy/feature.js",
+    "node_modules/legacy/feature.js",
+    null,
+    null,
+  ],
+  [
+    "legacy/sub%2fy.js",
+    null,
+    null,
+    "ERR_INVALID_MODULE_SPECIFIER",
+    "MODULE_NOT_FOUND",
+  ],
+] as const;
+
+it("matches native Node package URL finalization through the production graph", async () => {
+  const root = await createTestTempDirectory("rea-package-url-finalization-");
+  await writeFixtureFiles(root, {
+    "package.json": JSON.stringify({
+      name: "app",
+      type: "module",
+      imports: {
+        "#dir/*": ["./*/", "./safe.js"],
+        "#fixed/*": "./safe.js",
+      },
+    }),
+    "main.mjs": packageUrlFinalizationCases
+      .map(([specifier]) => `import ${JSON.stringify(specifier)};`)
+      .join("\n"),
+    "main.cjs": packageUrlFinalizationCases
+      .map(([specifier]) => `require(${JSON.stringify(specifier)});`)
+      .join("\n"),
+    "safe.js": 'export default "safe.js";',
+    "folder/index.js": 'export default "index decoy";',
+    "node_modules/fixture/package.json": JSON.stringify({
+      type: "module",
+      exports: {
+        "./dir/*": ["./*/", "./safe.js"],
+        "./fixed/*": "./safe.js",
+      },
+    }),
+    "node_modules/fixture/safe.js":
+      'export default "node_modules/fixture/safe.js";',
+    "node_modules/fixture/folder/index.js": 'export default "index decoy";',
+    "node_modules/legacy/package.json": '{"type":"module"}',
+    "node_modules/legacy/feature.js":
+      'export default "node_modules/legacy/feature.js";',
+    "node_modules/legacy/sub/y.js": 'export default "separator decoy";',
+    "node_modules/outside.js": 'export default "node_modules/outside.js";',
+  });
+  const native = await promisify(execFile)(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `import { createRequire } from "node:module";
+import { relative } from "node:path";
+const require = createRequire(import.meta.url);
+const results = [];
+for (const specifier of ${JSON.stringify(packageUrlFinalizationCases.map(([specifier]) => specifier))}) {
+  let imported, required;
+  try { imported = { path: (await import(specifier)).default }; }
+  catch (error) { imported = { error: error.code }; }
+  try { required = { path: relative(process.cwd(), require.resolve(specifier)).replaceAll("\\\\", "/") }; }
+  catch (error) { required = { error: error.code }; }
+  results.push({ specifier, imported, required });
+}
+console.log(JSON.stringify(results));`,
+    ],
+    { cwd: root, timeout: 5_000 },
+  );
+  expect(JSON.parse(native.stdout)).toEqual(
+    packageUrlFinalizationCases.map(
+      ([specifier, imported, required, importError, requireError]) => ({
+        specifier,
+        imported:
+          importError === null ? { path: imported } : { error: importError },
+        required:
+          requireError === null ? { path: required } : { error: requireError },
+      }),
+    ),
+  );
+  const graph = await relationshipGraph(root);
+  for (const [
+    specifier,
+    imported,
+    required,
+    importError,
+    requireError,
+  ] of packageUrlFinalizationCases) {
+    const edges = graph.edges.filter(
+      (edge) =>
+        edge.relation === "imports" && edge.properties.specifier === specifier,
+    );
+    expect(edges, specifier).toHaveLength(4);
+    for (const edge of edges) {
+      const isRequire =
+        edge.properties.module_link_kind === "require" ||
+        edge.properties.kind === "require";
+      const target = isRequire ? required : imported;
+      const error = isRequire ? requireError : importError;
+      expect(edge.properties.resolved_path, specifier).toBe(target);
+      expect(edge.properties.resolution_status, specifier).toBe(
+        error === null
+          ? "resolved"
+          : error === "MODULE_NOT_FOUND"
+            ? "not-found"
+            : "rejected",
+      );
+    }
+  }
+});
