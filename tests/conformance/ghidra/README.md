@@ -32,6 +32,20 @@ binaries and Ghidra projects are never committed.
   named limitations through the real read-only TCP bridge and provider Evidence
   projection; default Unix-socket transport, Windows, and the reported Amethyst
   artifact need separate verification. Fixture target code is never executed.
+- `ReaIndirectBranchEvidenceProbe.java` decompiles source-owned AArch64,
+  AVR8, and MIPS32 instructions in temporary Ghidra programs. It verifies warning
+  attribution at non-entry computed jumps, colliding default/overlay offsets,
+  byte versus addressable-word coordinates, wrapped comments, and MIPS delay
+  slots. Detached
+  markup controls cover absent provenance, warning-looking string literals,
+  wrong source locations, and separate comments. Real AArch64 and MIPS function
+  dossiers pass through the Ghidra adapter schema and shared native API
+  uncertainty projection; AVR exercises only the native API producing boundary.
+  Run `npm run build:cached`, then
+  `node scripts/verify-real-ghidra-warning-attribution.mjs` with Ghidra 12.1.4 and
+  JDK 21 on Linux or macOS. This producer-level lane does not exercise CLI/MCP
+  transport, add AVR target admission, or validate an Allegrex extension or PSP
+  loader. No fixture code is executed or persistent Ghidra project retained.
 
 `scripts/verify-real-ghidra.mjs` uses `cc`, `clang`, and `lld-link` by default;
 `REA_CC`, `REA_CLANG`, and `REA_LLD_LINK` can select alternate commands. The

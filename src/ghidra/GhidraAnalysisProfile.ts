@@ -43,6 +43,8 @@ import {
 } from "../domain/native/nativeAotPe.js";
 
 const callRelationshipCoverage = "function-body-call-coverage-v5";
+const indirectBranchInventory =
+  "listing-computed-jumps-typed-warning-address-v2";
 const functionBoundaryObservations = "ghidra-function-boundary-limitations-v4";
 const instructionReferenceCoverage =
   "exact-address-incoming-without-synthetic-entry-v2";
@@ -143,6 +145,7 @@ export const resolveGhidraAnalysisProfile = async (
           procedure_file_offset_resolution:
             "address-first-unique-target-source-mapping-v2",
           instruction_flow_evidence: "decoded-return-pcode-v1",
+          indirect_branch_inventory: indirectBranchInventory,
           instruction_references: instructionReferenceCoverage,
           function_boundary_observations: functionBoundaryObservations,
           no_return_repair:
@@ -253,6 +256,7 @@ export const resolveGhidraAnalysisProfile = async (
         procedure_file_offset_resolution:
           "address-first-unique-target-source-mapping-v2",
         instruction_flow_evidence: "decoded-return-pcode-v1",
+        indirect_branch_inventory: indirectBranchInventory,
         instruction_references: instructionReferenceCoverage,
         function_boundary_observations: functionBoundaryObservations,
         no_return_repair:

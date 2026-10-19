@@ -56,8 +56,11 @@ import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.decompiler.DecompiledFunction;
+import ghidra.app.decompiler.ClangBreak;
 import ghidra.app.decompiler.ClangCaseToken;
+import ghidra.app.decompiler.ClangCommentToken;
 import ghidra.app.decompiler.ClangNode;
+import ghidra.app.decompiler.ClangToken;
 import ghidra.framework.Application;
 import ghidra.app.util.bin.format.pdb.PdbParserConstants;
 import ghidra.framework.options.Options;
@@ -2347,14 +2350,150 @@ public final class ReaGhidraBridge extends HeadlessScript {
         }
 
         JumpTable[] recoveredJumpTables = highFunction.getJumpTables();
-        List<ClangNode> caseTokens = new ArrayList<>();
+        List<ClangNode> markupTokens = new ArrayList<>();
         if (decompilation.getCCodeMarkup() != null) {
-            decompilation.getCCodeMarkup().flatten(caseTokens);
+            decompilation.getCCodeMarkup().flatten(markupTokens);
         }
         for (int index = 0; index < recoveredJumpTables.length; index += 1) {
-            jumpTables.add(inferredJumpTable(recoveredJumpTables[index], caseTokens));
+            jumpTables.add(inferredJumpTable(recoveredJumpTables[index], markupTokens));
         }
+        result.add(
+            "unresolved_indirect_branches",
+            unresolvedIndirectBranches(
+                function,
+                recoveredJumpTables,
+                markupTokens
+            )
+        );
         return result;
+    }
+
+    private static final String DECOMPILER_JUMP_TABLE_FAILURE =
+        "WARNING: Could not recover jumptable at ";
+
+    /**
+     * Printed warning coordinates omit overlay identity and use addressable
+     * units, which need not be bytes. Ghidra's comment markup already carries
+     * the exact source Address, including its overlay and byte offset.
+     * The default C-style comments are split into word tokens: retain their
+     * boundaries and source identity instead of joining unrelated comments.
+     */
+    private Map<Address, String> decompilerJumpTableFailures(List<ClangNode> tokens) throws Exception {
+        Map<Address, String> warnings = new HashMap<>();
+        Address source = null;
+        StringBuilder text = new StringBuilder();
+        for (ClangNode node : tokens) {
+            monitor.checkCancelled();
+            if (!(node instanceof ClangCommentToken comment)) {
+                if (node instanceof ClangBreak ||
+                    (node instanceof ClangToken token && token.getText() != null && token.getText().isBlank())) continue;
+                source = null;
+                text.setLength(0);
+                continue;
+            }
+            String fragment = comment.getText();
+            if (fragment == null) {
+                source = null;
+                text.setLength(0);
+                continue;
+            }
+            if (fragment.startsWith("/*")) {
+                source = comment.getMinAddress();
+                text.setLength(0);
+                fragment = fragment.substring(2);
+            }
+            if (source == null || !source.isMemoryAddress() ||
+                !source.equals(comment.getMinAddress()) || !source.equals(comment.getMaxAddress())) {
+                source = null;
+                text.setLength(0);
+                continue;
+            }
+            boolean complete = fragment.endsWith("*/");
+            if (complete) fragment = fragment.substring(0, fragment.length() - 2);
+            if (!fragment.isBlank()) {
+                if (text.length() > 0) text.append(' ');
+                text.append(fragment.strip());
+            }
+            if (complete) {
+                String warning = text.toString();
+                if (warning.startsWith(DECOMPILER_JUMP_TABLE_FAILURE) &&
+                    warning.length() > DECOMPILER_JUMP_TABLE_FAILURE.length())
+                    warnings.putIfAbsent(source, warning.substring("WARNING: ".length()));
+                source = null;
+                text.setLength(0);
+            }
+        }
+        return warnings;
+    }
+
+    /**
+     * Report computed jumps that Ghidra's listing keeps inside this function
+     * but for which the decompiler recovered no jump table. When jump-table
+     * recovery fails, the decompiler rewrites the BRANCHIND as a call or return
+     * (FlowInfo::truncateIndirectJump), so these sites never reach HighFunction
+     * jump tables. Each site keeps the decompiler's own outcome: an explicit
+     * "Could not recover jumptable" warning, or no warning (for example Ghidra's
+     * thunk heuristic). Neither outcome separates a dispatch from an indirect
+     * tail call, so targets stay unknown either way.
+     */
+    private JsonArray unresolvedIndirectBranches(
+        Function function,
+        JumpTable[] recoveredJumpTables,
+        List<ClangNode> markupTokens
+    ) throws Exception {
+        Set<Address> switches = new HashSet<>();
+        for (JumpTable table : recoveredJumpTables) switches.add(table.getSwitchAddress());
+        Map<Address, String> failedRecoveries = decompilerJumpTableFailures(markupTokens);
+        JsonArray branches = new JsonArray();
+        InstructionIterator instructions = currentProgram.getListing().getInstructions(
+            function.getBody(), true
+        );
+        while (instructions.hasNext()) {
+            monitor.checkCancelled();
+            Instruction instruction = instructions.next();
+            FlowType flow = instruction.getFlowType();
+            if (!flow.isJump() || !flow.isComputed() || flow.isCall() || flow.isTerminal()) continue;
+            Address address = instruction.getAddress();
+            if (switches.contains(address)) continue;
+            String warning = failedRecoveries.get(address);
+            JsonObject branch = new JsonObject();
+            String branchAddress = canonicalAddress(address);
+            branch.addProperty("branch_address", branchAddress);
+            branch.addProperty(
+                "decompiler_outcome",
+                warning == null ? "no_jump_table_warning" : "jump_table_recovery_failed"
+            );
+            JsonArray listingTargets = new JsonArray();
+            for (Address target : instruction.getFlows()) listingTargets.add(canonicalAddress(target));
+            branch.add("listing_targets", listingTargets);
+            JsonArray evidence = new JsonArray();
+            evidence.add(
+                inferenceEvidence(
+                    "indirect-branch",
+                    "ghidra-listing",
+                    "Ghidra's listing marks " + instruction.getMnemonicString() +
+                    " at " + branchAddress + " as a computed jump (" + flow +
+                    ") inside this function, and the decompiler recovered no jump table at that address." +
+                    (listingTargets.isEmpty()
+                        ? " The listing records no flow targets for it."
+                        : " The listing records " + listingTargets.size() +
+                          " flow target(s) without case values; they are reference observations, not proof of runtime reachability.")
+                )
+            );
+            if (warning != null) {
+                evidence.add(
+                    inferenceEvidence(
+                        "indirect-branch",
+                        "ghidra-decompiler-warning",
+                        "The decompiler reported \"" + warning +
+                        "\" and rewrote the branch as a call or return in its pseudocode."
+                    )
+                );
+            }
+            branch.add("evidence", evidence);
+            branches.add(branch);
+        }
+        return branches;
     }
 
     private static JsonObject unavailableNativeApiBoundary(String reason) {

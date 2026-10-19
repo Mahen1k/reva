@@ -460,6 +460,8 @@ describe("Ghidra raw-binary profile", () => {
           compiler_spec_id: "default",
           language_selection: "caller-supplied-v1",
           entry_point: "0x8000000",
+          indirect_branch_inventory:
+            "listing-computed-jumps-typed-warning-address-v2",
         },
       },
     });
@@ -1107,6 +1109,8 @@ describe("Ghidra client projection", () => {
       compiler_spec_id: "auto-default",
       call_relationship_coverage: "function-body-call-coverage-v5",
       function_dossier_coverage: "observed-facets-and-call-relationships-v1",
+      indirect_branch_inventory:
+        "listing-computed-jumps-typed-warning-address-v2",
     });
 
     const result = await ghidra
