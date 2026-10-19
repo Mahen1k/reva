@@ -4,6 +4,7 @@ import {
   annotateEnglishUnicodeCaseCollisions,
   ArtifactPathRegistry,
   normalizeArtifactPath,
+  unicodeNormalizationLimitation,
 } from "../ArtifactPaths.js";
 import {
   ArtifactReaderFailure,
@@ -176,11 +177,11 @@ const visitArtifactEntries = async (
         continue;
       }
       const entry = next.value;
-      const logicalPath = normalizeArtifactPath(
+      const rawLogicalPath =
         frame.prefix.length === 0
           ? entry.path
-          : `${frame.prefix}/${entry.path}`,
-      );
+          : `${frame.prefix}/${entry.path}`;
+      const logicalPath = normalizeArtifactPath(rawLogicalPath);
       const expandableAsar = isExpandableAsar(entry, logicalPath);
       context.registry.add(
         logicalPath,
@@ -195,6 +196,14 @@ const visitArtifactEntries = async (
         null,
         duplicateOrdinal,
       );
+      // Inventory identity uses the NFC logical path, but the archive's decoded
+      // spelling is source evidence: preserve it when normalization replaced it.
+      const normalizationLimitation = unicodeNormalizationLimitation(
+        rawLogicalPath,
+        logicalPath,
+      );
+      if (normalizationLimitation !== undefined)
+        occurrence.limitations.push(normalizationLimitation);
       let digested:
         | {
             readonly node: ArtifactNode;
