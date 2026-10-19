@@ -57,8 +57,30 @@ export interface ClientConfigurationDocument {
    */
   readonly legacyServers: Record<string, unknown>;
 }
-
 const objectSchema = z.record(z.string(), z.unknown());
+export const codexToolApprovalModeSchema = z.enum([
+  "approve",
+  "prompt",
+  "auto",
+]);
+export const codexToolOutputTokenLimitSchema = z.union([
+  z.number().int().positive(),
+  z.bigint().positive(),
+]);
+
+/** Codex per-tool configuration entry (`[mcp_servers.<server>.tools.<tool>]`). */
+export const codexServerToolSchema = z
+  .object({
+    approval_mode: codexToolApprovalModeSchema.optional(),
+    output_token_limit: codexToolOutputTokenLimitSchema.optional(),
+  })
+  .passthrough();
+
+/** Codex per-tool configuration table (`[mcp_servers.<server>.tools.<tool>]`). */
+export const codexServerToolsSchema = z.record(
+  z.string(),
+  codexServerToolSchema,
+);
 
 /** Compare parsed configuration values without depending on parser prototypes. */
 export const clientConfigurationValuesEqual = (

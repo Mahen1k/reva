@@ -439,7 +439,149 @@ describe("Node-wrapped registration policy", () => {
       ]);
     },
   );
+
+  registerClientToolPolicyTests();
 });
+
+function registerClientToolPolicyTests(): void {
+  it("accepts Codex per-tool approval settings under mcp_servers.rea.tools", async () => {
+    const home = await createTestTempDirectory("rea-codex-tool-settings-");
+    await mkdir(join(home, ".codex"));
+    const entry = resolve("scripts/rea.mjs");
+    await writeFile(
+      join(home, ".codex/config.toml"),
+      `[mcp_servers.rea]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${JSON.stringify(entry)}, "mcp"]\nstartup_timeout_sec = 30\ntool_timeout_sec = 450\n\n[mcp_servers.rea.tools.binary_session]\napproval_mode = "approve"\n`,
+    );
+
+    const statuses = await readClientRegistrationStatuses(home, entry, {
+      environment: {},
+    });
+
+    expect(statuses).toEqual([
+      expect.objectContaining({
+        client: "codex",
+        state: "aligned",
+        remediation: null,
+      }),
+    ]);
+  });
+
+  it.each([
+    'tools = ["*"]',
+    '[mcp_servers.rea.tools]\nbinary_session = "approve"',
+    "[mcp_servers.rea.tools.binary_session]\napproval_mode = 12",
+    '[mcp_servers.rea.tools.binary_session]\napproval_mode = "unsupported"',
+    '[mcp_servers.rea.tools.binary_session]\noutput_token_limit = "bad"',
+    "[mcp_servers.rea.tools.binary_session]\noutput_token_limit = 0",
+    "[mcp_servers.rea.tools.binary_session]\noutput_token_limit = -10",
+  ])(
+    "reports malformed Codex tools setting %s as invalid",
+    async (toolsFragment) => {
+      const home = await createTestTempDirectory("rea-codex-invalid-tools-");
+      await mkdir(join(home, ".codex"));
+      const entry = resolve("scripts/rea.mjs");
+      await writeFile(
+        join(home, ".codex/config.toml"),
+        `[mcp_servers.rea]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${JSON.stringify(entry)}, "mcp"]\nstartup_timeout_sec = 30\ntool_timeout_sec = 450\n${toolsFragment}\n`,
+      );
+
+      const statuses = await readClientRegistrationStatuses(home, entry, {
+        environment: {},
+      });
+
+      expect(statuses).toEqual([
+        expect.objectContaining({
+          client: "codex",
+          state: "invalid",
+          command: [],
+        }),
+      ]);
+    },
+  );
+
+  it("accepts recognized and unknown future settings under a Codex per-tool table", async () => {
+    const home = await createTestTempDirectory("rea-codex-future-tools-");
+    await mkdir(join(home, ".codex"));
+    const entry = resolve("scripts/rea.mjs");
+    await writeFile(
+      join(home, ".codex/config.toml"),
+      `[mcp_servers.rea]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${JSON.stringify(entry)}, "mcp"]\nstartup_timeout_sec = 30\ntool_timeout_sec = 450\n\n[mcp_servers.rea.tools.binary_session]\napproval_mode = "approve"\noutput_token_limit = 32000\ncustom_future_flag = true\n`,
+    );
+
+    const statuses = await readClientRegistrationStatuses(home, entry, {
+      environment: {},
+    });
+
+    expect(statuses).toEqual([
+      expect.objectContaining({
+        client: "codex",
+        state: "aligned",
+        remediation: null,
+      }),
+    ]);
+  });
+
+  it("reports a non-array Copilot CLI tools setting as invalid", async () => {
+    const home = await createTestTempDirectory("rea-copilot-invalid-tools-");
+    await mkdir(join(home, ".copilot"));
+    const entry = resolve("scripts/rea.mjs");
+    await writeFile(
+      join(home, ".copilot/mcp-config.json"),
+      JSON.stringify({
+        mcpServers: {
+          rea: {
+            type: "stdio",
+            command: process.execPath,
+            args: [entry, "mcp"],
+            tools: { binary_session: { approval_mode: "approve" } },
+          },
+        },
+      }),
+    );
+
+    const statuses = await readClientRegistrationStatuses(home, entry, {
+      environment: {},
+    });
+
+    expect(statuses).toEqual([
+      expect.objectContaining({
+        client: "copilot_cli",
+        state: "invalid",
+        command: [],
+      }),
+    ]);
+  });
+
+  it("reports a non-array OpenCode tools setting as invalid", async () => {
+    const home = await createTestTempDirectory("rea-opencode-invalid-tools-");
+    await mkdir(join(home, ".config/opencode"), { recursive: true });
+    const entry = resolve("scripts/rea.mjs");
+    await writeFile(
+      join(home, ".config/opencode/opencode.json"),
+      JSON.stringify({
+        mcp: {
+          rea: {
+            type: "local",
+            command: [process.execPath, entry, "mcp"],
+            tools: { binary_session: { approval_mode: "approve" } },
+          },
+        },
+      }),
+    );
+
+    const statuses = await readClientRegistrationStatuses(home, entry, {
+      environment: {},
+    });
+
+    expect(statuses).toEqual([
+      expect.objectContaining({
+        client: "opencode",
+        state: "invalid",
+        command: [],
+      }),
+    ]);
+  });
+}
 
 it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
   "reports an inaccessible configuration target instead of omitting its registration",
