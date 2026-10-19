@@ -1066,12 +1066,19 @@ export class RizinDebugSessionManager {
     frame: RizinFrame,
     frameBytes: number,
   ): void {
-    const historyFrame =
-      frameBytes > MAX_RECENT_FRAME_BYTES || frame.truncated
-        ? `${frame.text.slice(0, MAX_RECENT_FRAME_BYTES)}[recent frame truncated]`
-        : frame.text;
-    if (frameBytes > MAX_RECENT_FRAME_BYTES || frame.truncated)
+    const historyBytes = Buffer.from(frame.text, "utf8");
+    let historyFrame = frame.text;
+    if (historyBytes.length > MAX_RECENT_FRAME_BYTES || frame.truncated) {
       session.historyTruncated = true;
+      let keptBytes = Math.min(historyBytes.length, MAX_RECENT_FRAME_BYTES);
+      while (
+        keptBytes > 0 &&
+        keptBytes < historyBytes.length &&
+        (historyBytes[keptBytes]! & 0xc0) === 0x80
+      )
+        keptBytes -= 1;
+      historyFrame = `${historyBytes.subarray(0, keptBytes).toString("utf8")}[recent frame truncated]`;
+    }
     session.history.push(historyFrame);
     if (session.history.length > 64) {
       session.history.splice(0, session.history.length - 64);

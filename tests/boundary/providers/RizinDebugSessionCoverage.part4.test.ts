@@ -100,6 +100,24 @@ it.skipIf(process.platform === "win32")(
 );
 
 it.skipIf(process.platform === "win32")(
+  "bounds recent history byte budget for multi-byte CJK frames",
+  async () => {
+    const provider = await makeProvider(
+      'process.stdout.write("\\0"); process.stdin.resume(); setTimeout(() => process.stdout.write("雪".repeat(20000) + "\\0"), 20);',
+    );
+    const { manager, sessionId } = await start(provider);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const status = manager.status(sessionId);
+    expect(status?.recent_output_truncated).toBe(true);
+    const lastFrame = status?.recent_output.at(-1) ?? "";
+    expect(lastFrame).toContain("[recent frame truncated]");
+    expect(Buffer.byteLength(lastFrame, "utf8")).toBeLessThanOrEqual(
+      16 * 1024 + 24,
+    );
+  },
+);
+
+it.skipIf(process.platform === "win32")(
   "bounds recent history after many unsolicited frames",
   async () => {
     const provider = await makeProvider(
